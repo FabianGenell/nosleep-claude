@@ -2,7 +2,7 @@
 # nosleep-claude — prevent macOS sleep while the Claude Code CLI is running.
 set -u
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
 # LaunchAgent labels we recognize: the manual install uses com.genell.*,
 # Homebrew services uses homebrew.mxcl.*.
@@ -41,7 +41,10 @@ claude_running()    { pgrep -x "$PROCESS_NAME" >/dev/null 2>&1; }
 caffeinate_alive()  { [ -n "$CAFFEINATE_PID" ] && kill -0 "$CAFFEINATE_PID" 2>/dev/null; }
 
 start_caffeinate() {
-    caffeinate -dimsu &
+    # -i prevent idle sleep, -m prevent disk-idle, -s prevent system sleep on AC, -u declare user activity.
+    # We deliberately omit -d so the display can still sleep on lid close — that's what
+    # triggers the OS lock screen. System sleep is still blocked, so Claude keeps running.
+    caffeinate -imsu &
     CAFFEINATE_PID=$!
     log "started caffeinate (pid $CAFFEINATE_PID)"
     if sudo -n pmset -b disablesleep 1 >/dev/null 2>&1; then
@@ -108,9 +111,9 @@ cmd_status() {
     fi
     echo
 
-    echo "Caffeinate (-dimsu):"
-    if pgrep -fl 'caffeinate -dimsu' >/dev/null 2>&1; then
-        pgrep -fl 'caffeinate -dimsu' | awk '{print "  " $0}'
+    echo "Caffeinate (-imsu):"
+    if pgrep -fl 'caffeinate -imsu' >/dev/null 2>&1; then
+        pgrep -fl 'caffeinate -imsu' | awk '{print "  " $0}'
     else
         echo "  none"
     fi
