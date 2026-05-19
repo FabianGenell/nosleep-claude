@@ -1,0 +1,166 @@
+#!/bin/bash
+# nosleep-claude — prevent macOS sleep while the Claude Code CLI is running.
+set -u
+
+VERSION="0.1.0"
+SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
+LABEL="com.genell.nosleep-claude"
+
+INTERVAL="${NOSLEEP_CLAUDE_INTERVAL:-5}"
+PROCESS_NAME="${NOSLEEP_CLAUDE_PROCESS:-claude}"
+
+usage() {
+    cat <<EOF
+nosleep-claude $VERSION — prevent macOS sleep while Claude Code is running.
+
+Usage:
+  nosleep-claude                       Run the polling daemon (used by LaunchAgent)
+  nosleep-claude status                Show daemon and caffeinate state
+  nosleep-claude install-sudoers       Install passwordless-sudo rule for lid-closed
+                                       support on battery (prompts for password)
+  nosleep-claude uninstall-sudoers     Remove the sudoers rule
+  nosleep-claude --version             Print version
+  nosleep-claude --help                Show this help
+
+Env:
+  NOSLEEP_CLAUDE_INTERVAL   poll interval in seconds (default: 5)
+  NOSLEEP_CLAUDE_PROCESS    process name to match (default: claude)
+EOF
+}
+
+log() { printf '%s [nosleep-claude] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+# ---------- daemon ----------
+
+CAFFEINATE_PID=""
+LID_DISABLED=0
+
+claude_running()    { pgrep -x "$PROCESS_NAME" >/dev/null 2>&1; }
+caffeinate_alive()  { [ -n "$CAFFEINATE_PID" ] && kill -0 "$CAFFEINATE_PID" 2>/dev/null; }
+
+start_caffeinate() {
+    caffeinate -dimsu &
+    CAFFEINATE_PID=$!
+    log "started caffeinate (pid $CAFFEINATE_PID)"
+    if sudo -n pmset -b disablesleep 1 >/dev/null 2>&1; then
+        LID_DISABLED=1
+        log "lid-close sleep disabled on battery"
+    fi
+}
+
+stop_caffeinate() {
+    if caffeinate_alive; then
+        kill "$CAFFEINATE_PID" 2>/dev/null || true
+        wait "$CAFFEINATE_PID" 2>/dev/null || true
+        log "stopped caffeinate"
+    fi
+    CAFFEINATE_PID=""
+    if [ "$LID_DISABLED" = "1" ]; then
+        sudo -n pmset -b disablesleep 0 >/dev/null 2>&1 || true
+        LID_DISABLED=0
+        log "lid-close sleep re-enabled on battery"
+    fi
+}
+
+cmd_daemon() {
+    trap 'stop_caffeinate; exit 0' EXIT INT TERM
+    log "starting v$VERSION (interval=${INTERVAL}s, process=${PROCESS_NAME})"
+    while true; do
+        if claude_running; then
+            caffeinate_alive || start_caffeinate
+        else
+            caffeinate_alive && stop_caffeinate
+        fi
+        sleep "$INTERVAL"
+    done
+}
+
+# ---------- status ----------
+
+cmd_status() {
+    local uid; uid="$(id -u)"
+    echo "nosleep-claude $VERSION"
+    echo
+
+    echo "LaunchAgent ($LABEL):"
+    if launchctl print "gui/$uid/$LABEL" >/dev/null 2>&1; then
+        echo "  loaded"
+        launchctl print "gui/$uid/$LABEL" 2>/dev/null | awk '/state =|pid =/{print "  " $0}'
+    else
+        echo "  not loaded (try: brew services start nosleep-claude)"
+    fi
+    echo
+
+    echo "Claude processes:"
+    if pgrep -x "$PROCESS_NAME" >/dev/null 2>&1; then
+        pgrep -x "$PROCESS_NAME" | while read -r pid; do
+            ps -o pid,args -p "$pid" | tail -1 | awk '{print "  " $0}'
+        done
+    else
+        echo "  none"
+    fi
+    echo
+
+    echo "Caffeinate (-dimsu):"
+    if pgrep -fl 'caffeinate -dimsu' >/dev/null 2>&1; then
+        pgrep -fl 'caffeinate -dimsu' | awk '{print "  " $0}'
+    else
+        echo "  none"
+    fi
+    echo
+
+    echo "Lid-close sleep (battery):"
+    if [ -f "$SUDOERS_FILE" ]; then
+        echo "  sudoers rule installed -> $SUDOERS_FILE"
+    else
+        echo "  sudoers rule NOT installed (run: nosleep-claude install-sudoers)"
+    fi
+}
+
+# ---------- sudoers ----------
+
+cmd_install_sudoers() {
+    if [ "$(id -u)" -ne 0 ]; then
+        exec sudo "$0" install-sudoers
+    fi
+    local user="${SUDO_USER:-$USER}"
+    if [ -z "$user" ] || [ "$user" = "root" ]; then
+        echo "error: could not determine the non-root user to grant the rule to." >&2
+        exit 1
+    fi
+    local tmp; tmp="$(mktemp)"
+    printf '%s ALL=(ALL) NOPASSWD: /usr/bin/pmset -b disablesleep *\n' "$user" > "$tmp"
+    if ! visudo -cf "$tmp" >/dev/null; then
+        echo "error: generated sudoers entry failed validation." >&2
+        rm -f "$tmp"; exit 1
+    fi
+    install -m 0440 -o root -g wheel "$tmp" "$SUDOERS_FILE"
+    rm -f "$tmp"
+    echo "installed $SUDOERS_FILE (user: $user)"
+    echo "lid-closed sleep prevention will activate on the next Claude session."
+}
+
+cmd_uninstall_sudoers() {
+    if [ "$(id -u)" -ne 0 ]; then
+        exec sudo "$0" uninstall-sudoers
+    fi
+    if [ -f "$SUDOERS_FILE" ]; then
+        rm -f "$SUDOERS_FILE"
+        echo "removed $SUDOERS_FILE"
+    else
+        echo "$SUDOERS_FILE not present, nothing to do"
+    fi
+    pmset -b disablesleep 0 >/dev/null 2>&1 || true
+}
+
+# ---------- dispatch ----------
+
+case "${1:-daemon}" in
+    daemon)             cmd_daemon ;;
+    status)             cmd_status ;;
+    install-sudoers)    cmd_install_sudoers ;;
+    uninstall-sudoers)  cmd_uninstall_sudoers ;;
+    -V|--version)       echo "$VERSION" ;;
+    -h|--help)          usage ;;
+    *)                  echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
+esac
