@@ -2,9 +2,11 @@
 # nosleep-claude — prevent macOS sleep while the Claude Code CLI is running.
 set -u
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
-LABEL="com.genell.nosleep-claude"
+# LaunchAgent labels we recognize: the manual install uses com.genell.*,
+# Homebrew services uses homebrew.mxcl.*.
+LABELS=("com.genell.nosleep-claude" "homebrew.mxcl.nosleep-claude")
 
 INTERVAL="${NOSLEEP_CLAUDE_INTERVAL:-5}"
 PROCESS_NAME="${NOSLEEP_CLAUDE_PROCESS:-claude}"
@@ -82,11 +84,16 @@ cmd_status() {
     echo "nosleep-claude $VERSION"
     echo
 
-    echo "LaunchAgent ($LABEL):"
-    if launchctl print "gui/$uid/$LABEL" >/dev/null 2>&1; then
-        echo "  loaded"
-        launchctl print "gui/$uid/$LABEL" 2>/dev/null | awk '/state =|pid =/{print "  " $0}'
-    else
+    echo "LaunchAgent:"
+    local found=0
+    for label in "${LABELS[@]}"; do
+        if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+            echo "  $label: loaded"
+            launchctl print "gui/$uid/$label" 2>/dev/null | awk '/state =|pid =/{print "    " $0}'
+            found=1
+        fi
+    done
+    if [ "$found" = "0" ]; then
         echo "  not loaded (try: brew services start nosleep-claude)"
     fi
     echo
