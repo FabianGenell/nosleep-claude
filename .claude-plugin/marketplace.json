@@ -1,5 +1,8 @@
 {
   "name": "nosleep-claude",
+  "metadata": {
+    "description": "Single-plugin marketplace for the nosleep-claude Claude Code plugin."
+  },
   "owner": {
     "name": "Fabian Genell",
     "url": "https://github.com/FabianGenell"
