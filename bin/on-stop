@@ -6,7 +6,6 @@ SESSION_ID=$(read_session_id)
 [ -z "$SESSION_ID" ] && exit 0
 
 CPID_FILE="$NOSLEEP_DIR/$SESSION_ID.cpid"
-LID_FILE="$NOSLEEP_DIR/$SESSION_ID.lid"
 
 if [ -f "$CPID_FILE" ]; then
     PID=$(cat "$CPID_FILE" 2>/dev/null)
@@ -15,10 +14,6 @@ if [ -f "$CPID_FILE" ]; then
     log "session=$SESSION_ID caffeinate=$PID (stopped)"
 fi
 
-if [ -f "$LID_FILE" ]; then
-    enable_lid_sleep
-    rm -f "$LID_FILE"
-    log "session=$SESSION_ID lid-close sleep re-enabled"
-fi
+lid_lock_release
 
 exit 0

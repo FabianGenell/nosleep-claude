@@ -5,12 +5,17 @@ HOOK=SessionStart
 SESSION_ID=$(read_session_id)
 [ -z "$SESSION_ID" ] && exit 0
 
-# Safety net: if a prior session crashed with disablesleep on, fix it.
-# No-op if no sudoers rule is installed.
-enable_lid_sleep || true
+# Wipe state for any session whose caffeinate is gone (handles prior crashes).
+clean_stale_sessions
 
-# Wipe any stale state for this session id (unlikely collision, but safe)
+# If, after cleanup, NO sessions hold the lid lock, reset pmset to a safe
+# baseline. If other sessions are still active, leave their state alone.
+if [ "$(count_active_lids)" = "0" ]; then
+    _pmset_enable || true
+fi
+
+# Drop any leftover state for this specific session_id (unlikely collision).
 rm -f "$NOSLEEP_DIR/$SESSION_ID.cpid" "$NOSLEEP_DIR/$SESSION_ID.lid"
 
-log "session=$SESSION_ID started"
+log "session=$SESSION_ID started (active lid holders: $(count_active_lids))"
 exit 0

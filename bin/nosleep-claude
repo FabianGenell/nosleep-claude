@@ -4,7 +4,7 @@
 # that enables lid-closed sleep prevention on battery.
 set -u
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 NOSLEEP_DIR="/tmp/nosleep-claude"
 SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
 LOG_FILE="$NOSLEEP_DIR/nosleep-claude.log"
