@@ -1,0 +1,22 @@
+#!/bin/bash
+HOOK=SessionEnd
+. "$(dirname "$0")/common.sh"
+
+SESSION_ID=$(read_session_id)
+[ -z "$SESSION_ID" ] && exit 0
+
+CPID_FILE="$NOSLEEP_DIR/$SESSION_ID.cpid"
+LID_FILE="$NOSLEEP_DIR/$SESSION_ID.lid"
+
+if [ -f "$CPID_FILE" ]; then
+    kill_pid_silent "$(cat "$CPID_FILE" 2>/dev/null)"
+    rm -f "$CPID_FILE"
+fi
+
+if [ -f "$LID_FILE" ]; then
+    enable_lid_sleep
+    rm -f "$LID_FILE"
+fi
+
+log "session=$SESSION_ID ended"
+exit 0

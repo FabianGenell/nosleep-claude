@@ -1,0 +1,24 @@
+#!/bin/bash
+HOOK=Stop
+. "$(dirname "$0")/common.sh"
+
+SESSION_ID=$(read_session_id)
+[ -z "$SESSION_ID" ] && exit 0
+
+CPID_FILE="$NOSLEEP_DIR/$SESSION_ID.cpid"
+LID_FILE="$NOSLEEP_DIR/$SESSION_ID.lid"
+
+if [ -f "$CPID_FILE" ]; then
+    PID=$(cat "$CPID_FILE" 2>/dev/null)
+    kill_pid_silent "$PID"
+    rm -f "$CPID_FILE"
+    log "session=$SESSION_ID caffeinate=$PID (stopped)"
+fi
+
+if [ -f "$LID_FILE" ]; then
+    enable_lid_sleep
+    rm -f "$LID_FILE"
+    log "session=$SESSION_ID lid-close sleep re-enabled"
+fi
+
+exit 0

@@ -1,61 +1,75 @@
 # nosleep-claude
 
-Keep your Mac awake while the Claude Code CLI is running. Including when the lid is closed.
+A Claude Code plugin that keeps your Mac awake **only while Claude is actively working on a prompt**. The moment Claude finishes, sleep returns to normal.
 
-A tiny LaunchAgent polls for the `claude` process every few seconds. When it sees one, it holds a `caffeinate -dimsu` child to block system sleep. When Claude exits, sleep returns to normal. With an opt-in sudoers rule, it also suppresses clamshell sleep on battery so closing the lid doesn't kill long-running agents.
+No daemon, no LaunchAgent, no polling. Just two hooks: `UserPromptSubmit` starts a `caffeinate` tied to Claude's process; `Stop` kills it. If Claude crashes or the terminal is closed, `caffeinate -w` drops automatically.
 
-## Install (Homebrew)
+## Install
 
-```sh
-brew install fabiangenell/tap/nosleep-claude
-brew services start nosleep-claude
-sudo nosleep-claude install-sudoers   # optional: lid-closed support on battery
+In Claude Code:
+
+```
+/plugin marketplace add FabianGenell/nosleep-claude
+/plugin install nosleep-claude@nosleep-claude
 ```
 
-Check it's working:
+Then restart Claude Code so the hooks load. That's it — every prompt now blocks system sleep for the duration of Claude's response.
+
+### Optional: lid-closed support on battery
+
+By default, closing the lid on battery still puts the Mac to sleep (`caffeinate` doesn't override clamshell sleep). To prevent that too:
 
 ```sh
-nosleep-claude status
+sudo ~/.claude/plugins/marketplaces/nosleep-claude/nosleep-claude/bin/nosleep-claude enable-lid-closed
 ```
 
-## Install (from source)
+(Run `/nosleep-claude` inside Claude to see the exact path on your machine.)
 
-```sh
-git clone https://github.com/FabianGenell/nosleep-claude.git
-cd nosleep-claude
-./install.sh
-```
+That installs a tightly-scoped passwordless-sudo rule for `pmset -b disablesleep`. After that, lid-closed sleep is suppressed during any active prompt — and re-enabled when Claude finishes.
 
-## What it does (and doesn't)
+## Behavior
 
-While Claude is running:
+While Claude is responding:
 
-- ✅ Lid closed on battery → stays awake (requires sudoers rule)
-- ✅ Lid closed on AC → stays awake
-- ✅ No input for hours → stays awake
-- ✅ You log out and back in → daemon auto-resumes via LaunchAgent
+- ✅ No idle sleep, no disk sleep, no system sleep
+- ✅ With lid-closed support: lid can close, Claude keeps running
+- ✅ Display can still sleep (screen lock still works as expected)
 
-What this *cannot* do: survive a shutdown, restart, dead battery, or kernel panic. Once the OS goes down, Claude goes with it. This tool prevents *automatic* sleep — it doesn't checkpoint your process.
+While Claude is idle (CLI open, waiting for input):
+
+- ✅ Mac sleeps normally per your Energy Saver settings
+- ✅ Battery is not held hostage
+
+When Claude crashes / terminal is killed / Ctrl+C interrupts:
+
+- `caffeinate -w <claude_pid>` auto-exits when Claude dies, so nothing leaks
+- Worst case (Ctrl+C without next prompt): caffeinate stays alive until session ends — handled by `SessionEnd` hook
+- All edge cases tilt toward "stay awake too long" rather than "sleep mid-task" (the safe direction)
 
 ## Uninstall
 
-```sh
-brew services stop nosleep-claude
-sudo nosleep-claude uninstall-sudoers
-brew uninstall nosleep-claude
+```
+/plugin uninstall nosleep-claude
 ```
 
-Or from a source install: `./uninstall.sh`.
+To also remove the lid-closed sudoers rule:
+
+```sh
+sudo ~/.claude/plugins/.../bin/nosleep-claude disable-lid-closed
+```
 
 ## How it works
 
-- LaunchAgent runs `nosleep-claude` (the daemon) at login and keeps it alive.
-- The daemon polls `pgrep -x claude` every 5 seconds (configurable via `NOSLEEP_CLAUDE_INTERVAL`).
-- When Claude appears, it spawns `caffeinate -dimsu` (blocks display, idle, disk-idle, and system sleep, declares user activity).
-- If the sudoers rule is installed, it also runs `sudo -n pmset -b disablesleep 1` to prevent clamshell sleep on battery.
-- When Claude exits, the daemon kills caffeinate and re-enables `disablesleep`. Normal Energy Saver rules resume.
+Four hooks in `hooks/hooks.json`:
 
-The sudoers rule is scoped to exactly `pmset -b disablesleep *` for your user — it can't be used to run other commands as root.
+| Hook | What it does |
+|------|--------------|
+| `UserPromptSubmit` | Spawns `caffeinate -imsu -w <claude_pid>`; records its PID; optionally flips `pmset -b disablesleep 1`. |
+| `Stop` | Kills the caffeinate for this session; restores `pmset disablesleep 0`. |
+| `SessionStart` | Safety reset (in case a prior session crashed with `disablesleep` still on). |
+| `SessionEnd` | Cleans up any leftover caffeinate / pmset state for the ended session. |
+
+State per session is tracked in `/tmp/nosleep-claude/<session_id>.cpid` and `.lid`. Recent activity is logged to `/tmp/nosleep-claude/nosleep-claude.log`.
 
 ## License
 

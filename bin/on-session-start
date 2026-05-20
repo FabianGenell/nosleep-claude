@@ -1,0 +1,16 @@
+#!/bin/bash
+HOOK=SessionStart
+. "$(dirname "$0")/common.sh"
+
+SESSION_ID=$(read_session_id)
+[ -z "$SESSION_ID" ] && exit 0
+
+# Safety net: if a prior session crashed with disablesleep on, fix it.
+# No-op if no sudoers rule is installed.
+enable_lid_sleep || true
+
+# Wipe any stale state for this session id (unlikely collision, but safe)
+rm -f "$NOSLEEP_DIR/$SESSION_ID.cpid" "$NOSLEEP_DIR/$SESSION_ID.lid"
+
+log "session=$SESSION_ID started"
+exit 0
