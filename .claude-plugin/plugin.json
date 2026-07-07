@@ -1,8 +1,8 @@
 {
   "name": "nosleep-claude",
   "displayName": "nosleep-claude",
-  "version": "1.1.0",
-  "description": "Keep macOS awake only while Claude Code is actively working on a prompt.",
+  "version": "1.2.0",
+  "description": "Keep macOS awake while Claude Code is working, with a 15-minute grace window after its last activity.",
   "author": {
     "name": "Fabian Genell",
     "url": "https://github.com/FabianGenell"

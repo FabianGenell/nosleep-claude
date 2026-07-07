@@ -8,22 +8,9 @@ SESSION_ID=$(read_session_id)
 # Drop any orphan state before we evaluate refcounts.
 clean_stale_sessions
 
-CLAUDE_PID=$(find_claude_pid) || {
-    log "session=$SESSION_ID could not find claude in ancestry from PPID=$PPID"
-    exit 0
-}
-
-CPID_FILE="$NOSLEEP_DIR/$SESSION_ID.cpid"
-
-# Clean up any leftover caffeinate from an interrupted prompt in this session.
-if [ -f "$CPID_FILE" ]; then
-    kill_pid_silent "$(cat "$CPID_FILE" 2>/dev/null)"
-fi
-
-# Spawn caffeinate tied to claude's PID. -w means it auto-dies if claude does.
-caffeinate -imsu -w "$CLAUDE_PID" </dev/null >/dev/null 2>&1 &
-echo $! > "$CPID_FILE"
-log "session=$SESSION_ID claude=$CLAUDE_PID caffeinate=$! (started)"
+# Start a fresh grace timer; tool-call activity keeps extending it while
+# Claude works.
+refresh_caffeinate force
 
 # Acquire shared lid-lock (refcounted across all sessions).
 lid_lock_acquire

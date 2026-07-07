@@ -1,0 +1,12 @@
+#!/bin/bash
+HOOK=PostToolUse
+. "$(dirname "$0")/common.sh"
+
+SESSION_ID=$(read_session_id)
+[ -z "$SESSION_ID" ] && exit 0
+
+# Claude just used a tool, so extend the grace timer (throttled so
+# back-to-back tool calls don't churn caffeinate processes).
+refresh_caffeinate
+
+exit 0

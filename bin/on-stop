@@ -5,14 +5,9 @@ HOOK=Stop
 SESSION_ID=$(read_session_id)
 [ -z "$SESSION_ID" ] && exit 0
 
-CPID_FILE="$NOSLEEP_DIR/$SESSION_ID.cpid"
-
-if [ -f "$CPID_FILE" ]; then
-    PID=$(cat "$CPID_FILE" 2>/dev/null)
-    kill_pid_silent "$PID"
-    rm -f "$CPID_FILE"
-    log "session=$SESSION_ID caffeinate=$PID (stopped)"
-fi
+# Claude just finished responding. Restart the timer so the grace window
+# counts from now, then let it expire on its own.
+refresh_caffeinate force
 
 lid_lock_release
 

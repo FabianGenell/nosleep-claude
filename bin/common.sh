@@ -6,6 +6,16 @@ NOSLEEP_DIR="/tmp/nosleep-claude"
 SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
 LOG_FILE="$NOSLEEP_DIR/nosleep-claude.log"
 
+# How long the Mac stays awake after Claude's last activity. Every prompt,
+# tool call, and stop restarts a caffeinate with this timeout, so sleep
+# prevention always self-expires. A missed Stop hook can't pin the machine
+# awake indefinitely.
+GRACE_SECS="${NOSLEEP_GRACE_SECS:-900}"
+
+# Skip the restart if the current timer was refreshed less than this many
+# seconds ago, so per-tool-call hooks don't churn processes.
+REFRESH_THROTTLE_SECS=60
+
 mkdir -p "$NOSLEEP_DIR" 2>/dev/null || true
 
 log() {
@@ -26,27 +36,34 @@ read_session_id() {
     fi
 }
 
-# Walk up the process tree from this hook until we find the `claude` CLI.
-find_claude_pid() {
-    local pid="$PPID" i=0
-    while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$i" -lt 10 ]; do
-        local comm
-        comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' \n' | sed 's|.*/||')
-        if [ "$comm" = "claude" ]; then
-            printf '%s' "$pid"
-            return 0
-        fi
-        pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' \n')
-        i=$((i+1))
-    done
-    return 1
-}
-
 kill_pid_silent() {
     local pid="$1"
     [ -n "$pid" ] || return 0
     kill -0 "$pid" 2>/dev/null && kill "$pid" 2>/dev/null
     return 0
+}
+
+# (Re)start this session's self-expiring caffeinate timer. Pass "force" to
+# always restart (used on prompt/stop so the grace window starts exactly at
+# that moment); without it, a recent-enough timer is left alone.
+refresh_caffeinate() {
+    local force="${1:-}"
+    local cpid_file="$NOSLEEP_DIR/$SESSION_ID.cpid"
+    local pid
+    if [ -f "$cpid_file" ]; then
+        pid=$(cat "$cpid_file" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            if [ "$force" != "force" ]; then
+                local age
+                age=$(( $(date +%s) - $(stat -f %m "$cpid_file" 2>/dev/null || echo 0) ))
+                [ "$age" -lt "$REFRESH_THROTTLE_SECS" ] && return 0
+            fi
+            kill "$pid" 2>/dev/null
+        fi
+    fi
+    caffeinate -imsu -t "$GRACE_SECS" </dev/null >/dev/null 2>&1 &
+    echo $! > "$cpid_file"
+    log "session=$SESSION_ID caffeinate=$! (refreshed, expires in ${GRACE_SECS}s)"
 }
 
 # Drop state files for any session whose caffeinate is no longer alive.

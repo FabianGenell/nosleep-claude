@@ -1,8 +1,8 @@
 # nosleep-claude
 
-A Claude Code plugin that keeps your Mac awake **only while Claude is actively working on a prompt**. The moment Claude finishes, sleep returns to normal.
+A Claude Code plugin that keeps your Mac awake **while Claude is actively working**, plus a 15-minute grace window after its last activity. Then sleep returns to normal.
 
-No daemon, no LaunchAgent, no polling. Just two hooks: `UserPromptSubmit` starts a `caffeinate` tied to Claude's process; `Stop` kills it. If Claude crashes or the terminal is closed, `caffeinate -w` drops automatically.
+No daemon, no LaunchAgent, no polling. Every prompt and tool call (re)starts a self-expiring `caffeinate -t 900`; when Claude stops, the timer restarts one last time and simply runs out. Because sleep prevention always self-expires, nothing can pin the Mac awake for more than the grace window — even if Claude crashes or a hook never fires.
 
 ## Install
 
@@ -13,7 +13,9 @@ In Claude Code:
 /plugin install nosleep-claude@nosleep-claude
 ```
 
-Then restart Claude Code so the hooks load. That's it — every prompt now blocks system sleep for the duration of Claude's response.
+Then restart Claude Code so the hooks load. That's it — every prompt now blocks system sleep for the duration of Claude's response plus the grace window.
+
+The grace window defaults to 15 minutes. Set `NOSLEEP_GRACE_SECS` in the environment Claude Code runs in to change it.
 
 ### Optional: lid-closed support on battery
 
@@ -29,22 +31,21 @@ That installs a tightly-scoped passwordless-sudo rule for `pmset -b disablesleep
 
 ## Behavior
 
-While Claude is responding:
+While Claude is responding (and for 15 minutes after it finishes):
 
 - ✅ No idle sleep, no disk sleep, no system sleep
 - ✅ With lid-closed support: lid can close, Claude keeps running
 - ✅ Display can still sleep (screen lock still works as expected)
 
-While Claude is idle (CLI open, waiting for input):
+Once the grace window runs out:
 
-- ✅ Mac sleeps normally per your Energy Saver settings
+- ✅ Mac sleeps normally per your Energy Saver settings, even with the CLI still open at the prompt
 - ✅ Battery is not held hostage
 
 When Claude crashes / terminal is killed / Ctrl+C interrupts:
 
-- `caffeinate -w <claude_pid>` auto-exits when Claude dies, so nothing leaks
-- Worst case (Ctrl+C without next prompt): caffeinate stays alive until session ends — handled by `SessionEnd` hook
-- All edge cases tilt toward "stay awake too long" rather than "sleep mid-task" (the safe direction)
+- Every caffeinate carries a `-t` timeout, so the worst case is "awake for one extra grace window", never "awake forever"
+- `SessionEnd` kills the timer immediately when a session exits cleanly
 
 ## Uninstall
 
@@ -60,14 +61,15 @@ sudo ~/.claude/plugins/.../bin/nosleep-claude disable-lid-closed
 
 ## How it works
 
-Four hooks in `hooks/hooks.json`:
+Five hooks in `hooks/hooks.json`:
 
 | Hook | What it does |
 |------|--------------|
-| `UserPromptSubmit` | Spawns `caffeinate -imsu -w <claude_pid>`; records its PID; optionally flips `pmset -b disablesleep 1`. |
-| `Stop` | Kills the caffeinate for this session; restores `pmset disablesleep 0`. |
+| `UserPromptSubmit` | Restarts a self-expiring `caffeinate -imsu -t <grace>`; optionally flips `pmset -b disablesleep 1`. |
+| `PostToolUse` | Extends the timer while Claude works (throttled to one restart per minute). |
+| `Stop` | Restarts the timer once more so the grace window counts from when Claude finished; restores `pmset disablesleep 0`. |
 | `SessionStart` | Safety reset (in case a prior session crashed with `disablesleep` still on). |
-| `SessionEnd` | Cleans up any leftover caffeinate / pmset state for the ended session. |
+| `SessionEnd` | Kills the timer and cleans up pmset state for the ended session. |
 
 State per session is tracked in `/tmp/nosleep-claude/<session_id>.cpid` and `.lid`. Recent activity is logged to `/tmp/nosleep-claude/nosleep-claude.log`.
 

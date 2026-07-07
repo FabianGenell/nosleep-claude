@@ -4,7 +4,7 @@
 # that enables lid-closed sleep prevention on battery.
 set -u
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 NOSLEEP_DIR="/tmp/nosleep-claude"
 SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
 LOG_FILE="$NOSLEEP_DIR/nosleep-claude.log"
@@ -22,9 +22,11 @@ Usage:
   nosleep-claude help                Show this help
   nosleep-claude --version           Print version
 
-The plugin's hooks fire automatically on every Claude Code prompt — there is
-no service to start or stop. Lid-closed sleep prevention on battery is the
-only opt-in piece (it needs root to flip pmset).
+The plugin's hooks fire automatically on every Claude Code prompt and tool
+call; there is no service to start or stop. Sleep prevention self-expires
+15 minutes after Claude's last activity (override with NOSLEEP_GRACE_SECS).
+Lid-closed sleep prevention on battery is the only opt-in piece (it needs
+root to flip pmset).
 EOF
 }
 
