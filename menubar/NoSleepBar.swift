@@ -9,6 +9,13 @@ import Cocoa
 let pollInterval: TimeInterval = 5
 let manualHoldSeconds = 3600
 
+// The two glyphs. Override either with an env var in the LaunchAgent to try
+// a different pair without rebuilding.
+let awakeSymbol = ProcessInfo.processInfo.environment["NOSLEEP_SYMBOL_AWAKE"]
+    ?? "waveform.path.ecg"
+let sleepSymbol = ProcessInfo.processInfo.environment["NOSLEEP_SYMBOL_SLEEP"]
+    ?? "minus"
+
 struct Snapshot {
     var verdict = "UNKNOWN"
     var healthy = false
@@ -125,9 +132,9 @@ final class Controller: NSObject, NSMenuDelegate {
         if snapshot.cliMissing || !snapshot.healthy {
             symbol = "exclamationmark.triangle"
         } else if snapshot.sleepBlocked {
-            symbol = "cup.and.saucer.fill"
+            symbol = awakeSymbol
         } else {
-            symbol = "moon.zzz"
+            symbol = sleepSymbol
         }
 
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description) {
