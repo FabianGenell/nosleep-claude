@@ -15,6 +15,10 @@ SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 KNOWN_MARKETPLACES="$CLAUDE_DIR/plugins/known_marketplaces.json"
 INSTALLED_PLUGINS="$CLAUDE_DIR/plugins/installed_plugins.json"
 GRACE_SECS="${NOSLEEP_GRACE_SECS:-900}"
+MENUBAR_LABEL="net.genell.nosleepbar"
+MENUBAR_PLIST="$HOME/Library/LaunchAgents/$MENUBAR_LABEL.plist"
+MENUBAR_BIN="$HOME/.local/bin/nosleepbar"
+MENUBAR_SRC="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/menubar/NoSleepBar.swift"
 
 OK="✔"; BAD="✘"; MEH="–"
 
@@ -24,8 +28,12 @@ nosleep-claude $VERSION
 
 Usage:
   nosleep-claude status              Full health check (wiring, hooks, awake state)
-  nosleep-claude status --short      One line: OK / IDLE / BROKEN
+  nosleep-claude status --short      One line: OK / IDLE / STALE / BROKEN
+  nosleep-claude status --json       Machine-readable snapshot
   nosleep-claude logs                Show recent hook log entries
+  nosleep-claude menubar install     Build and start the menu bar indicator
+  nosleep-claude menubar uninstall   Stop and remove it
+  nosleep-claude menubar restart     Rebuild from source and reload
   nosleep-claude enable-lid-closed   Install sudoers rule for lid-closed support
                                      (prompts for sudo password once)
   nosleep-claude disable-lid-closed  Remove the sudoers rule
@@ -121,6 +129,20 @@ pid_elapsed_secs() {
         else              print $1*60 + $2
     }'
 }
+
+# Processes actually blocking idle system sleep, one "pid name" per line.
+# powerd's "prevent sleep while display is on" is filtered out: it holds an
+# assertion the whole time the screen is lit, which says nothing about
+# whether the Mac will sleep once you walk away.
+sleep_holders() {
+    pmset -g assertions 2>/dev/null \
+        | awk '/Listed by owning process/{seen=1; next} seen' \
+        | grep 'PreventUserIdleSystemSleep' \
+        | grep -v 'Prevent sleep while display is on' \
+        | sed -E 's/^[[:space:]]*pid ([0-9]+)\(([^)]+)\).*/\1 \2/'
+}
+
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 disablesleep_value() {
     local v
@@ -280,6 +302,197 @@ cmd_status() {
     return $rc
 }
 
+# ---------------------------------------------------------------- json
+
+# Machine-readable snapshot, used by the menu bar app and anything else that
+# wants to know whether this Mac is going to sleep.
+cmd_status_json() {
+    local live=0 left=0 elapsed pid f sid
+    local -a session_pids=()
+    if [ -d "$NOSLEEP_DIR" ]; then
+        for f in "$NOSLEEP_DIR"/*.cpid; do
+            [ -e "$f" ] || continue
+            pid=$(cat "$f" 2>/dev/null)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                live=$((live + 1))
+                session_pids+=("$pid")
+                elapsed=$(pid_elapsed_secs "$pid" || echo 0)
+                local this_left=$((GRACE_SECS - elapsed))
+                [ "$this_left" -lt 0 ] && this_left=0
+                [ "$this_left" -gt "$left" ] && left=$this_left
+            fi
+        done
+    fi
+
+    # Who is holding idle sleep open, with our own caffeinates named.
+    local holders="" name hpid seen
+    while read -r hpid name; do
+        [ -n "$hpid" ] || continue
+        for pid in ${session_pids[@]+"${session_pids[@]}"}; do
+            [ "$hpid" = "$pid" ] && name="nosleep-claude"
+        done
+        # A bare caffeinate says nothing useful; name it after whatever spawned it
+        # (Claude Code runs its own short caffeinate while a turn is in flight).
+        if [ "$name" = "caffeinate" ]; then
+            local parent
+            parent=$(ps -o comm= -p "$(ps -o ppid= -p "$hpid" 2>/dev/null | tr -d ' ')" 2>/dev/null)
+            parent=$(basename "${parent:-caffeinate}")
+            [ -n "$parent" ] && [ "$parent" != "caffeinate" ] && name="$parent"
+        fi
+        case ",$holders," in *",$name,"*) continue ;; esac
+        holders="${holders:+$holders,}$name"
+    done < <(sleep_holders)
+
+    local blocked=false
+    [ -n "$holders" ] && blocked=true
+
+    local last_epoch=0 last_age=-1 last_line=""
+    if [ -f "$LOG_FILE" ]; then
+        last_epoch=$(stat -f %m "$LOG_FILE" 2>/dev/null || echo 0)
+        [ "$last_epoch" -gt 0 ] && last_age=$(( $(date +%s) - last_epoch ))
+        last_line=$(tail -1 "$LOG_FILE" 2>/dev/null)
+    fi
+
+    local lid_rule=false
+    [ -f "$SUDOERS_FILE" ] && lid_rule=true
+    local disablesleep; disablesleep=$(disablesleep_value)
+    local lid_blocked=false
+    [ "$disablesleep" = "1" ] && lid_blocked=true
+
+    local verdict healthy=true
+    if [ ! -f "$LOG_FILE" ]; then
+        verdict="BROKEN"; healthy=false
+    elif [ "$live" -gt 0 ]; then
+        verdict="OK"
+    else
+        verdict="IDLE"
+    fi
+
+    # Holder list as a JSON array.
+    local arr="" h
+    local IFS=,
+    for h in $holders; do
+        arr="${arr:+$arr,}\"$(json_escape "$h")\""
+    done
+    unset IFS
+
+    printf '{'
+    printf '"version":"%s",' "$VERSION"
+    printf '"verdict":"%s",' "$verdict"
+    printf '"healthy":%s,' "$healthy"
+    printf '"sleep_blocked":%s,' "$blocked"
+    printf '"blocked_by":[%s],' "$arr"
+    printf '"sessions":%s,' "$live"
+    printf '"seconds_left":%s,' "$left"
+    printf '"grace_secs":%s,' "$GRACE_SECS"
+    printf '"lid_rule_installed":%s,' "$lid_rule"
+    printf '"lid_closed_blocked":%s,' "$lid_blocked"
+    printf '"last_hook_epoch":%s,' "$last_epoch"
+    printf '"last_hook_age":%s,' "$last_age"
+    printf '"last_hook_line":"%s"' "$(json_escape "$last_line")"
+    printf '}\n'
+}
+
+# ------------------------------------------------------------- menu bar
+
+menubar_running() { launchctl list 2>/dev/null | grep -q "$MENUBAR_LABEL"; }
+
+menubar_build() {
+    if [ ! -f "$MENUBAR_SRC" ]; then
+        echo "error: menu bar source not found at $MENUBAR_SRC" >&2
+        return 1
+    fi
+    if ! command -v swiftc >/dev/null 2>&1; then
+        echo "error: swiftc not found. Install the Xcode command line tools:" >&2
+        echo "  xcode-select --install" >&2
+        return 1
+    fi
+    mkdir -p "$(dirname "$MENUBAR_BIN")"
+    echo "building $MENUBAR_BIN"
+    swiftc -O -o "$MENUBAR_BIN" "$MENUBAR_SRC" || return 1
+}
+
+menubar_write_plist() {
+    mkdir -p "$(dirname "$MENUBAR_PLIST")"
+    cat > "$MENUBAR_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$MENUBAR_LABEL</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$MENUBAR_BIN</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>NOSLEEP_CLI</key>
+		<string>$(cd "$(dirname "$0")" && pwd)/nosleep-claude</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/nosleepbar.err.log</string>
+</dict>
+</plist>
+PLIST
+}
+
+menubar_load() {
+    launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$MENUBAR_PLIST" 2>/dev/null \
+        || launchctl load "$MENUBAR_PLIST" 2>/dev/null
+}
+
+cmd_menubar() {
+    case "${1:-status}" in
+        install)
+            menubar_build || exit 1
+            menubar_write_plist
+            menubar_load
+            sleep 1
+            if menubar_running; then
+                echo "menu bar indicator running (look for the cup icon in the top bar)"
+            else
+                echo "launched, but launchctl does not list it. See /tmp/nosleepbar.err.log" >&2
+                exit 1
+            fi
+            ;;
+        uninstall)
+            launchctl bootout "gui/$(id -u)/$MENUBAR_LABEL" >/dev/null 2>&1 \
+                || launchctl unload "$MENUBAR_PLIST" >/dev/null 2>&1 || true
+            rm -f "$MENUBAR_PLIST"
+            pkill -f "$MENUBAR_BIN" 2>/dev/null || true
+            echo "menu bar indicator removed (binary left at $MENUBAR_BIN)"
+            ;;
+        restart)
+            menubar_build || exit 1
+            menubar_write_plist
+            menubar_load
+            echo "menu bar indicator reloaded"
+            ;;
+        status)
+            if menubar_running; then
+                echo "menu bar indicator: running ($MENUBAR_BIN)"
+            elif [ -f "$MENUBAR_PLIST" ]; then
+                echo "menu bar indicator: installed but not running. See /tmp/nosleepbar.err.log"
+            else
+                echo "menu bar indicator: not installed. Run: nosleep-claude menubar install"
+            fi
+            ;;
+        *)
+            echo "unknown menubar command: $1" >&2
+            echo "usage: nosleep-claude menubar [install|uninstall|restart|status]" >&2
+            exit 2
+            ;;
+    esac
+}
+
 cmd_logs() {
     if [ -f "$LOG_FILE" ]; then
         tail -30 "$LOG_FILE"
@@ -325,8 +538,15 @@ cmd_disable_lid_closed() {
 }
 
 case "${1:-help}" in
-    status)              shift; cmd_status "${1:-}" ;;
+    status)
+        shift
+        case "${1:-}" in
+            --json)  cmd_status_json ;;
+            *)       cmd_status "${1:-}" ;;
+        esac
+        ;;
     logs)                cmd_logs ;;
+    menubar)             shift; cmd_menubar "${1:-status}" ;;
     enable-lid-closed)   cmd_enable_lid_closed ;;
     disable-lid-closed)  cmd_disable_lid_closed ;;
     help|-h|--help)      usage ;;
