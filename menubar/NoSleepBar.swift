@@ -9,12 +9,56 @@ import Cocoa
 let pollInterval: TimeInterval = 5
 let manualHoldSeconds = 3600
 
-// The two glyphs. Override either with an env var in the LaunchAgent to try
-// a different pair without rebuilding.
+// Awake is a filled disc with the pulse trace knocked out of it, drawn below
+// because SF Symbols has no equivalent. Asleep is the stock hollow ring.
+// Setting NOSLEEP_SYMBOL_AWAKE swaps the disc for that symbol instead, so a
+// different pair can be tried from the LaunchAgent without rebuilding.
 let awakeSymbol = ProcessInfo.processInfo.environment["NOSLEEP_SYMBOL_AWAKE"]
-    ?? "waveform.path.ecg"
 let sleepSymbol = ProcessInfo.processInfo.environment["NOSLEEP_SYMBOL_SLEEP"]
-    ?? "minus"
+    ?? "minus.circle"
+
+let glyphSize: CGFloat = 18
+
+// Drawn in a 24x24 space to match how the candidates were designed, then
+// scaled down: a disc, with the trace removed from it rather than laid on top,
+// so the glyph stays a single solid mark in the bar.
+func pulseDiscImage(size: CGFloat = glyphSize) -> NSImage {
+    let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { _ in
+        guard let ctx = NSGraphicsContext.current else { return false }
+        let k = size / 24
+
+        NSColor.black.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 2.8 * k, y: 2.8 * k, width: 18.4 * k, height: 18.4 * k)).fill()
+
+        // y runs upward here, so the trace is mirrored from the SVG sketch.
+        // Kept well inside the rim: a trace that reaches the edge cuts notches
+        // in the disc and the mark stops reading as solid.
+        let points: [(CGFloat, CGFloat)] = [
+            (6.6, 12), (8.5, 12), (9.6, 15.7), (11.6, 8.1), (13.0, 12.6), (13.9, 11.7), (17.4, 11.7),
+        ]
+        let trace = NSBezierPath()
+        trace.move(to: NSPoint(x: points[0].0 * k, y: points[0].1 * k))
+        for point in points.dropFirst() {
+            trace.line(to: NSPoint(x: point.0 * k, y: point.1 * k))
+        }
+        trace.lineWidth = 2.5 * k
+        trace.lineCapStyle = .round
+        trace.lineJoinStyle = .round
+
+        ctx.compositingOperation = .destinationOut
+        NSColor.black.setStroke()
+        trace.stroke()
+        return true
+    }
+    image.isTemplate = true
+    return image
+}
+
+func symbolImage(_ name: String, _ description: String) -> NSImage? {
+    guard let image = NSImage(systemSymbolName: name, accessibilityDescription: description) else { return nil }
+    image.isTemplate = true
+    return image
+}
 
 struct Snapshot {
     var verdict = "UNKNOWN"
@@ -126,19 +170,18 @@ final class Controller: NSObject, NSMenuDelegate {
 
     func render() {
         guard let button = statusItem.button else { return }
-        let symbol: String
         var description = snapshot.headline
+        let image: NSImage?
 
         if snapshot.cliMissing || !snapshot.healthy {
-            symbol = "exclamationmark.triangle"
+            image = symbolImage("exclamationmark.triangle", description)
         } else if snapshot.sleepBlocked {
-            symbol = awakeSymbol
+            image = awakeSymbol.flatMap { symbolImage($0, description) } ?? pulseDiscImage()
         } else {
-            symbol = sleepSymbol
+            image = symbolImage(sleepSymbol, description)
         }
 
-        if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: description) {
-            image.isTemplate = true
+        if let image {
             button.image = image
             button.title = ""
         } else {
@@ -270,6 +313,20 @@ final class Controller: NSObject, NSMenuDelegate {
         manualHold?.terminate()
         NSApp.terminate(nil)
     }
+}
+
+// `nosleepbar --export-icon <path>` writes the awake glyph to a PNG, which is
+// the only way to look at a hand-drawn template image without the bar.
+let args = CommandLine.arguments
+if let flag = args.firstIndex(of: "--export-icon"), args.count > flag + 1 {
+    let scale: CGFloat = 8
+    let image = pulseDiscImage(size: glyphSize * scale)
+    if let tiff = image.tiffRepresentation,
+       let rep = NSBitmapImageRep(data: tiff),
+       let png = rep.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: args[flag + 1]))
+    }
+    exit(0)
 }
 
 let app = NSApplication.shared

@@ -59,7 +59,7 @@ nosleep-claude menubar restart    # rebuild after editing the Swift source
 nosleep-claude menubar uninstall
 ```
 
-A small `NSStatusItem` app (`menubar/NoSleepBar.swift`, ~100KB compiled, no Dock icon) that renders `status --json`: a filled cup while something is holding this Mac awake, a moon when it will sleep on idle, and a countdown while a Claude session holds the grace timer. The menu names the current holders, the number of Claude sessions, when hooks last fired, the lid-closed state, and offers a manual one-hour hold.
+A small `NSStatusItem` app (`menubar/NoSleepBar.swift`, ~100KB compiled, no Dock icon) that renders `status --json`: a filled disc with a pulse trace knocked out of it while something is holding this Mac awake, a hollow ring when it will sleep on idle, and a countdown while a Claude session holds the grace timer. The menu names the current holders, the number of Claude sessions, when hooks last fired, the lid-closed state, and offers a manual one-hour hold.
 
 It reads the same JSON anything else can:
 
@@ -68,6 +68,14 @@ nosleep-claude status --json
 ```
 
 `sleep_blocked` deliberately ignores powerd's "prevent sleep while display is on" assertion, which is held the whole time the screen is lit and says nothing about what happens once you walk away.
+
+The awake glyph is drawn by hand (SF Symbols has no knockout disc); `nosleepbar --export-icon out.png` writes it to a file, which is the only way to inspect a template image without the menu bar. `NOSLEEP_SYMBOL_AWAKE` and `NOSLEEP_SYMBOL_SLEEP` swap either half for a stock symbol, and `menubar install` / `restart` bake whatever is set into the LaunchAgent:
+
+```sh
+NOSLEEP_SYMBOL_AWAKE=waveform.path.ecg.rectangle \
+NOSLEEP_SYMBOL_SLEEP=minus.rectangle \
+nosleep-claude menubar restart
+```
 
 `menubar install` builds with `swiftc` (Xcode command line tools) and installs a `net.genell.nosleepbar` LaunchAgent so it comes back at login. If a menu bar manager like Ice or Bartender is running, the icon may land in its hidden section.
 
