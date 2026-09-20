@@ -40,7 +40,7 @@ func pulseDiscImage(size: CGFloat = glyphSize) -> NSImage {
         // Kept well inside the rim: a trace that reaches the edge cuts notches
         // in the disc and the mark stops reading as solid.
         let points: [(CGFloat, CGFloat)] = [
-            (5.5, 12), (7.8, 12), (9.1, 16.4), (11.5, 7.3), (13.2, 12.7), (14.3, 11.6), (18.5, 11.6),
+            (5.5, 12), (7.8, 12), (9.2, 15.5), (11.6, 8.3), (13.2, 12.5), (14.3, 11.7), (18.5, 11.7),
         ]
         let trace = NSBezierPath()
         trace.move(to: NSPoint(x: points[0].0 * k, y: points[0].1 * k))
@@ -50,7 +50,7 @@ func pulseDiscImage(size: CGFloat = glyphSize) -> NSImage {
         trace.lineWidth = 2.1 * k
         trace.lineCapStyle = .butt
         trace.lineJoinStyle = .miter
-        trace.miterLimit = 6
+        trace.miterLimit = 3
 
         ctx.compositingOperation = .destinationOut
         NSColor.black.setStroke()
