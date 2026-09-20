@@ -17,7 +17,13 @@ let awakeSymbol = ProcessInfo.processInfo.environment["NOSLEEP_SYMBOL_AWAKE"]
 let sleepSymbol = ProcessInfo.processInfo.environment["NOSLEEP_SYMBOL_SLEEP"]
     ?? "minus.circle"
 
-let glyphSize: CGFloat = 18
+// Menu bar glyphs sit in a 22pt content area. 20 puts the disc at the same
+// visual weight as neighbouring items; NOSLEEP_GLYPH_SIZE tunes it.
+let glyphSize: CGFloat = {
+    guard let raw = ProcessInfo.processInfo.environment["NOSLEEP_GLYPH_SIZE"],
+          let requested = Double(raw) else { return 20 }
+    return min(max(CGFloat(requested), 12), 22)
+}()
 
 // Drawn in a 24x24 space to match how the candidates were designed, then
 // scaled down: a disc, with the trace removed from it rather than laid on top,
@@ -28,22 +34,23 @@ func pulseDiscImage(size: CGFloat = glyphSize) -> NSImage {
         let k = size / 24
 
         NSColor.black.setFill()
-        NSBezierPath(ovalIn: NSRect(x: 2.8 * k, y: 2.8 * k, width: 18.4 * k, height: 18.4 * k)).fill()
+        NSBezierPath(ovalIn: NSRect(x: 1 * k, y: 1 * k, width: 22 * k, height: 22 * k)).fill()
 
         // y runs upward here, so the trace is mirrored from the SVG sketch.
         // Kept well inside the rim: a trace that reaches the edge cuts notches
         // in the disc and the mark stops reading as solid.
         let points: [(CGFloat, CGFloat)] = [
-            (6.6, 12), (8.5, 12), (9.6, 15.7), (11.6, 8.1), (13.0, 12.6), (13.9, 11.7), (17.4, 11.7),
+            (5.5, 12), (7.8, 12), (9.1, 16.4), (11.5, 7.3), (13.2, 12.7), (14.3, 11.6), (18.5, 11.6),
         ]
         let trace = NSBezierPath()
         trace.move(to: NSPoint(x: points[0].0 * k, y: points[0].1 * k))
         for point in points.dropFirst() {
             trace.line(to: NSPoint(x: point.0 * k, y: point.1 * k))
         }
-        trace.lineWidth = 2.5 * k
-        trace.lineCapStyle = .round
-        trace.lineJoinStyle = .round
+        trace.lineWidth = 2.1 * k
+        trace.lineCapStyle = .butt
+        trace.lineJoinStyle = .miter
+        trace.miterLimit = 6
 
         ctx.compositingOperation = .destinationOut
         NSColor.black.setStroke()

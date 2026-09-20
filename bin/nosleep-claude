@@ -4,7 +4,7 @@
 # rule that enables lid-closed sleep prevention on battery.
 set -u
 
-VERSION="1.4.1"
+VERSION="1.4.2"
 PLUGIN_ID="nosleep-claude@nosleep-claude"
 MARKETPLACE="nosleep-claude"
 NOSLEEP_DIR="/tmp/nosleep-claude"
@@ -417,6 +417,7 @@ menubar_build() {
 symbol_overrides() {
     [ -n "${NOSLEEP_SYMBOL_AWAKE:-}" ] && printf '\n\t\t<key>NOSLEEP_SYMBOL_AWAKE</key>\n\t\t<string>%s</string>' "$NOSLEEP_SYMBOL_AWAKE"
     [ -n "${NOSLEEP_SYMBOL_SLEEP:-}" ] && printf '\n\t\t<key>NOSLEEP_SYMBOL_SLEEP</key>\n\t\t<string>%s</string>' "$NOSLEEP_SYMBOL_SLEEP"
+    [ -n "${NOSLEEP_GLYPH_SIZE:-}" ] && printf '\n\t\t<key>NOSLEEP_GLYPH_SIZE</key>\n\t\t<string>%s</string>' "$NOSLEEP_GLYPH_SIZE"
     return 0
 }
 

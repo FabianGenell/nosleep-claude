@@ -69,7 +69,7 @@ nosleep-claude status --json
 
 `sleep_blocked` deliberately ignores powerd's "prevent sleep while display is on" assertion, which is held the whole time the screen is lit and says nothing about what happens once you walk away.
 
-The awake glyph is drawn by hand (SF Symbols has no knockout disc); `nosleepbar --export-icon out.png` writes it to a file, which is the only way to inspect a template image without the menu bar. `NOSLEEP_SYMBOL_AWAKE` and `NOSLEEP_SYMBOL_SLEEP` swap either half for a stock symbol, and `menubar install` / `restart` bake whatever is set into the LaunchAgent:
+The awake glyph is drawn by hand (SF Symbols has no knockout disc); `nosleepbar --export-icon out.png` writes it to a file, which is the only way to inspect a template image without the menu bar. `NOSLEEP_GLYPH_SIZE` sets how big it draws (12 to 22 points, 20 by default), and `NOSLEEP_SYMBOL_AWAKE` / `NOSLEEP_SYMBOL_SLEEP` swap either half for a stock symbol, and `menubar install` / `restart` bake whatever is set into the LaunchAgent:
 
 ```sh
 NOSLEEP_SYMBOL_AWAKE=waveform.path.ecg.rectangle \
