@@ -1,20 +1,30 @@
 #!/bin/bash
-# nosleep-claude — user-facing CLI for the nosleep-claude plugin.
-# Used for status checks and installing/removing the optional sudoers rule
-# that enables lid-closed sleep prevention on battery.
+# nosleep-claude: user-facing CLI for the nosleep-claude plugin.
+# Status/health checks, plus installing or removing the optional sudoers
+# rule that enables lid-closed sleep prevention on battery.
 set -u
 
-VERSION="1.2.0"
+VERSION="1.3.0"
+PLUGIN_ID="nosleep-claude@nosleep-claude"
+MARKETPLACE="nosleep-claude"
 NOSLEEP_DIR="/tmp/nosleep-claude"
 SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
 LOG_FILE="$NOSLEEP_DIR/nosleep-claude.log"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+KNOWN_MARKETPLACES="$CLAUDE_DIR/plugins/known_marketplaces.json"
+INSTALLED_PLUGINS="$CLAUDE_DIR/plugins/installed_plugins.json"
+GRACE_SECS="${NOSLEEP_GRACE_SECS:-900}"
+
+OK="✔"; BAD="✘"; MEH="–"
 
 usage() {
     cat <<EOF
 nosleep-claude $VERSION
 
 Usage:
-  nosleep-claude status              Show current state (sessions, caffeinate, sudoers)
+  nosleep-claude status              Full health check (wiring, hooks, awake state)
+  nosleep-claude status --short      One line: OK / IDLE / BROKEN
   nosleep-claude logs                Show recent hook log entries
   nosleep-claude enable-lid-closed   Install sudoers rule for lid-closed support
                                      (prompts for sudo password once)
@@ -27,62 +37,254 @@ call; there is no service to start or stop. Sleep prevention self-expires
 15 minutes after Claude's last activity (override with NOSLEEP_GRACE_SECS).
 Lid-closed sleep prevention on battery is the only opt-in piece (it needs
 root to flip pmset).
+
+status exits 0 when healthy or idle, 1 when the plugin is not actually wired
+up (the failure mode where hooks silently never fire).
 EOF
 }
 
+# ---------------------------------------------------------------- helpers
+
+have_json() { command -v jq >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; }
+
+# json_query <file> <jq-expression>: prints the result, empty on any failure.
+json_query() {
+    local file="$1" expr="$2"
+    [ -f "$file" ] || return 0
+    if command -v jq >/dev/null 2>&1; then
+        jq -c -r "$expr // empty" "$file" 2>/dev/null
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$file" "$expr" <<'PY' 2>/dev/null
+import json, sys
+path, expr = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(open(path))
+except Exception:
+    sys.exit(0)
+# Only the handful of simple paths this CLI uses are supported.
+cur = data
+for part in expr.strip('.').split('|'):
+    part = part.strip()
+    if not part:
+        continue
+    if part.startswith('.'):
+        part = part[1:]
+    for key in part.replace('[', '.').replace(']', '').replace('"', '').split('.'):
+        key = key.strip()
+        if key == '':
+            continue
+        if isinstance(cur, list):
+            try:
+                cur = cur[int(key)]
+            except Exception:
+                sys.exit(0)
+        elif isinstance(cur, dict):
+            if key not in cur:
+                sys.exit(0)
+            cur = cur[key]
+        else:
+            sys.exit(0)
+if cur is None:
+    sys.exit(0)
+print(cur if isinstance(cur, str) else json.dumps(cur, separators=(',', ':'), sort_keys=True))
+PY
+    fi
+}
+
+# jq prints objects with its own key order; normalise so two equal sources compare equal.
+json_source() {
+    local file="$1" expr="$2"
+    if command -v jq >/dev/null 2>&1; then
+        jq -c -S "$expr // empty" "$file" 2>/dev/null
+    else
+        json_query "$file" "$expr"
+    fi
+}
+
+human_ago() {
+    local secs="$1"
+    if   [ "$secs" -lt 60 ]    ; then printf '%ss ago' "$secs"
+    elif [ "$secs" -lt 3600 ]  ; then printf '%sm ago' "$((secs / 60))"
+    elif [ "$secs" -lt 86400 ] ; then printf '%sh %sm ago' "$((secs / 3600))" "$(((secs % 3600) / 60))"
+    else printf '%sd ago' "$((secs / 86400))"
+    fi
+}
+
+# Seconds a caffeinate pid has been running (empty if gone).
+pid_elapsed_secs() {
+    local pid="$1" etime
+    etime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$etime" ] || return 1
+    printf '%s' "$etime" | awk -F'[-:]' '{
+        if (NF == 4)      print $1*86400 + $2*3600 + $3*60 + $4
+        else if (NF == 3) print $1*3600 + $2*60 + $3
+        else              print $1*60 + $2
+    }'
+}
+
+disablesleep_value() {
+    local v
+    v=$(pmset -g custom 2>/dev/null | grep -i 'disablesleep' | head -1 | awk '{print $NF}')
+    printf '%s' "${v:-0}"
+}
+
+# --------------------------------------------------------------- status
+
 cmd_status() {
-    echo "nosleep-claude $VERSION (plugin)"
-    echo
-    echo "Active sessions:"
-    local found=0
+    local short=0
+    [ "${1:-}" = "--short" ] && short=1
+
+    # --- wiring -----------------------------------------------------------
+    local enabled marketplace_settings marketplace_known install_path
+    local installed_version source_dir source_version=""
+    local wiring_problem="" stale_install=""
+    if have_json; then
+        enabled=$(json_query "$SETTINGS_FILE" ".enabledPlugins.\"$PLUGIN_ID\"")
+        marketplace_settings=$(json_source "$SETTINGS_FILE" ".extraKnownMarketplaces.\"$MARKETPLACE\".source")
+        marketplace_known=$(json_source "$KNOWN_MARKETPLACES" ".\"$MARKETPLACE\".source")
+        install_path=$(json_query "$INSTALLED_PLUGINS" ".plugins.\"$PLUGIN_ID\"[0].installPath")
+        installed_version=$(json_query "$INSTALLED_PLUGINS" ".plugins.\"$PLUGIN_ID\"[0].version")
+        source_dir=$(json_query "$KNOWN_MARKETPLACES" ".\"$MARKETPLACE\".source.path")
+        if [ -n "$source_dir" ] && [ -f "$source_dir/.claude-plugin/plugin.json" ]; then
+            source_version=$(json_query "$source_dir/.claude-plugin/plugin.json" ".version")
+            if [ -n "$source_version" ] && [ -n "$installed_version" ] && \
+               [ "$source_version" != "$installed_version" ]; then
+                stale_install="installed v$installed_version, source dir has v$source_version. Run: claude plugin update $MARKETPLACE"
+            fi
+        fi
+
+        if [ "$enabled" != "true" ]; then
+            wiring_problem="plugin is not enabled in $SETTINGS_FILE (run: claude plugin install $PLUGIN_ID)"
+        elif [ -z "$marketplace_known" ]; then
+            wiring_problem="marketplace '$MARKETPLACE' is not registered (run: claude plugin marketplace add <path-or-repo>)"
+        elif [ -n "$marketplace_settings" ] && [ "$marketplace_settings" != "$marketplace_known" ]; then
+            wiring_problem="marketplace declaration in settings.json differs from the registry, so Claude Code refuses to load the plugin. Re-add it with: claude plugin marketplace remove $MARKETPLACE && claude plugin marketplace add <path-or-repo>"
+        elif [ -n "$install_path" ] && [ ! -d "$install_path" ]; then
+            wiring_problem="recorded install path is missing: $install_path"
+        fi
+    fi
+
+    # --- hook activity ----------------------------------------------------
+    local log_mtime="" log_age="" last_line=""
+    if [ -f "$LOG_FILE" ]; then
+        log_mtime=$(stat -f %m "$LOG_FILE" 2>/dev/null)
+        [ -n "$log_mtime" ] && log_age=$(( $(date +%s) - log_mtime ))
+        last_line=$(tail -1 "$LOG_FILE" 2>/dev/null)
+    fi
+
+    # --- live sessions ----------------------------------------------------
+    local live_sessions=0 stale_sessions=0 f sid pid
+    local -a session_lines=()
     if [ -d "$NOSLEEP_DIR" ]; then
         for f in "$NOSLEEP_DIR"/*.cpid; do
             [ -e "$f" ] || continue
-            found=1
-            local sid pid
             sid=$(basename "$f" .cpid)
             pid=$(cat "$f" 2>/dev/null)
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                echo "  $sid  caffeinate=$pid  (alive)"
+                live_sessions=$((live_sessions + 1))
+                local elapsed left
+                elapsed=$(pid_elapsed_secs "$pid" || echo 0)
+                left=$((GRACE_SECS - elapsed))
+                [ "$left" -lt 0 ] && left=0
+                session_lines+=("  $OK $sid  caffeinate=$pid  ~$((left / 60))m ${left}s left")
             else
-                echo "  $sid  caffeinate=$pid  (dead — will be cleaned up by next hook)"
+                stale_sessions=$((stale_sessions + 1))
+                session_lines+=("  $MEH $sid  caffeinate=${pid:-?}  (dead, next hook cleans it up)")
             fi
         done
     fi
-    [ "$found" = "0" ] && echo "  none"
-    echo
 
-    echo "Caffeinate processes (-imsu):"
-    if pgrep -fl 'caffeinate -imsu' >/dev/null 2>&1; then
-        pgrep -fl 'caffeinate -imsu' | awk '{print "  " $0}'
+    # --- verdict ----------------------------------------------------------
+    local verdict rc=0
+    if [ -n "$wiring_problem" ]; then
+        verdict="BROKEN: $wiring_problem"; rc=1
+    elif [ ! -f "$LOG_FILE" ]; then
+        verdict="BROKEN: hooks have never fired since boot. The plugin is wired up, so restart Claude Code to load it."; rc=1
+    elif [ -n "$stale_install" ]; then
+        verdict="STALE: $stale_install"
+    elif [ "$live_sessions" -gt 0 ]; then
+        verdict="OK: $live_sessions session(s) holding the Mac awake, last hook $(human_ago "$log_age")"
     else
-        echo "  none"
+        verdict="IDLE: no sleep block right now, last hook $(human_ago "$log_age")"
+    fi
+
+    if [ "$short" = "1" ]; then
+        echo "$verdict"
+        return $rc
+    fi
+
+    echo "nosleep-claude $VERSION"
+    echo
+    echo "$verdict"
+    echo
+    echo "Wiring"
+    if ! have_json; then
+        echo "  $MEH needs jq or python3 to read Claude Code's config"
+    else
+        row() { printf '  %s %-20s %s\n' "$1" "$2" "$3"; }
+        if [ "$enabled" = "true" ]; then row "$OK" "plugin enabled" "$PLUGIN_ID"
+        else                             row "$BAD" "plugin enabled" "not enabled in settings.json"; fi
+        if [ -n "$marketplace_known" ]; then row "$OK" "marketplace" "$marketplace_known"
+        else                                 row "$BAD" "marketplace" "not registered"; fi
+        if [ -z "$marketplace_settings" ] || [ "$marketplace_settings" = "$marketplace_known" ]; then
+            row "$OK" "settings vs registry" "declarations agree"
+        else
+            row "$BAD" "settings vs registry" "MISMATCH"
+            echo "       settings: $marketplace_settings"
+            echo "       registry: $marketplace_known"
+        fi
+        if [ -n "$install_path" ] && [ -d "$install_path" ]; then row "$OK" "installed at" "$install_path"
+        elif [ -n "$install_path" ];                          then row "$BAD" "installed at" "MISSING: $install_path"
+        else                                                       row "$BAD" "installed at" "no install recorded"; fi
+        if [ -n "$stale_install" ]; then row "$BAD" "version" "$stale_install"
+        elif [ -n "$installed_version" ]; then row "$OK" "version" "v$installed_version"; fi
     fi
     echo
 
-    echo "Lid-closed sleep prevention (battery):"
+    echo "Hook activity"
+    if [ -f "$LOG_FILE" ]; then
+        printf '  %s %-20s %s\n' "$OK" "last hook" "$(date -r "$log_mtime" '+%Y-%m-%d %H:%M:%S') ($(human_ago "$log_age"))"
+        [ -n "$last_line" ] && printf '  %s %-20s %s\n' " " "" "$last_line"
+        printf '  %s %-20s %s\n' " " "log" "$LOG_FILE"
+    else
+        echo "  $BAD no hooks have fired since boot (no $LOG_FILE)"
+    fi
+    echo
+
+    echo "Awake state"
+    printf '  %s %-20s %s\n' " " "grace window" "$GRACE_SECS s ($((GRACE_SECS / 60)) min after last activity)"
+    if [ "${#session_lines[@]}" -gt 0 ]; then
+        printf '%s\n' "${session_lines[@]}"
+    else
+        echo "  $MEH no sessions holding a timer"
+    fi
+    local caff
+    caff=$(pgrep -f 'caffeinate -imsu' 2>/dev/null | wc -l | tr -d ' ')
+    printf '  %s %-20s %s\n' " " "caffeinate" "$caff process(es) from this plugin"
     if [ -f "$SUDOERS_FILE" ]; then
-        echo "  ENABLED — sudoers rule at $SUDOERS_FILE"
+        printf '  %s %-20s %s\n' "$OK" "lid-closed" "enabled (sudoers rule present), pmset disablesleep = $(disablesleep_value)"
     else
-        echo "  DISABLED — run: nosleep-claude enable-lid-closed"
+        printf '  %s %-20s %s\n' "$MEH" "lid-closed" "off, run: nosleep-claude enable-lid-closed"
     fi
     echo
 
-    echo "Claude processes:"
+    echo "Claude processes"
     if pgrep -x claude >/dev/null 2>&1; then
         pgrep -x claude | while read -r p; do
-            ps -o pid,args -p "$p" 2>/dev/null | tail -1 | awk '{print "  " $0}'
+            ps -o pid,args -p "$p" 2>/dev/null | tail -1 | cut -c1-110 | awk '{print "     " $0}'
         done
     else
-        echo "  none"
+        echo "  $MEH none running"
     fi
+
+    return $rc
 }
 
 cmd_logs() {
     if [ -f "$LOG_FILE" ]; then
         tail -30 "$LOG_FILE"
     else
-        echo "(no log file yet at $LOG_FILE — submit a prompt to generate one)"
+        echo "(no log file yet at $LOG_FILE, submit a prompt to generate one)"
     fi
 }
 
@@ -123,7 +325,7 @@ cmd_disable_lid_closed() {
 }
 
 case "${1:-help}" in
-    status)              cmd_status ;;
+    status)              shift; cmd_status "${1:-}" ;;
     logs)                cmd_logs ;;
     enable-lid-closed)   cmd_enable_lid_closed ;;
     disable-lid-closed)  cmd_disable_lid_closed ;;

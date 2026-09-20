@@ -29,6 +29,44 @@ sudo ~/.claude/plugins/marketplaces/nosleep-claude/nosleep-claude/bin/nosleep-cl
 
 That installs a tightly-scoped passwordless-sudo rule for `pmset -b disablesleep`. After that, lid-closed sleep is suppressed during any active prompt — and re-enabled when Claude finishes.
 
+## Checking it actually works
+
+```sh
+nosleep-claude status          # full report, exits 1 if the plugin is not wired up
+nosleep-claude status --short  # one line: OK / IDLE / STALE / BROKEN
+nosleep-claude logs            # recent hook activity
+```
+
+Inside Claude Code the plugin's `bin/` is on PATH, so `nosleep-claude` just works, and `/nosleep-claude` prints the same report. To have it in a normal terminal too, symlink it:
+
+```sh
+ln -s ~/.claude/plugins/cache/nosleep-claude/nosleep-claude/*/bin/nosleep-claude ~/.local/bin/nosleep-claude
+```
+
+`status` checks the things that fail silently:
+
+- the plugin is enabled and its marketplace declaration in `settings.json` matches the registry (a mismatch makes Claude Code refuse to load the plugin, with no visible error)
+- the installed version matches the marketplace source, so local edits that were never reinstalled show up as `STALE`
+- hooks have actually fired (`/tmp/nosleep-claude/nosleep-claude.log` and how long ago)
+- which sessions hold a live timer and how much of the grace window is left
+- the lid-closed sudoers rule and the current `pmset disablesleep` value
+
+## Troubleshooting
+
+**`BROKEN — marketplace declaration in settings.json differs from the registry`**
+
+Claude Code compares `extraKnownMarketplaces` in `settings.json` against `plugins/known_marketplaces.json` and refuses the load on any difference, including fetch-shaping fields like `path` on a `github` source. Nothing surfaces in the UI — the hooks simply never run. Re-register:
+
+```sh
+claude plugin marketplace remove nosleep-claude
+claude plugin marketplace add <path-or-repo>
+claude plugin install nosleep-claude@nosleep-claude
+```
+
+**`BROKEN — hooks have never fired since boot`**
+
+The wiring is fine but this Claude Code process started before the plugin loaded. Restart Claude Code.
+
 ## Behavior
 
 While Claude is responding (and for 15 minutes after it finishes):
@@ -71,7 +109,7 @@ Five hooks in `hooks/hooks.json`:
 | `SessionStart` | Safety reset (in case a prior session crashed with `disablesleep` still on). |
 | `SessionEnd` | Kills the timer and cleans up pmset state for the ended session. |
 
-State per session is tracked in `/tmp/nosleep-claude/<session_id>.cpid` and `.lid`. Recent activity is logged to `/tmp/nosleep-claude/nosleep-claude.log`.
+State per session is tracked in `/tmp/nosleep-claude/<session_id>.cpid` and `.lid`. Recent activity is logged to `/tmp/nosleep-claude/nosleep-claude.log`, which is what `nosleep-claude status` reads to tell you whether the hooks are alive.
 
 ## License
 

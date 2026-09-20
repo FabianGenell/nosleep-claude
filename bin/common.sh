@@ -102,7 +102,7 @@ _pmset_enable()  { sudo -n /usr/bin/pmset -b disablesleep 0 >/dev/null 2>&1; }
 lid_lock_acquire() {
     local lid_file="$NOSLEEP_DIR/$SESSION_ID.lid"
     if [ "$(count_active_lids)" = "0" ]; then
-        # We'd be the first holder — only mark held if pmset actually flipped.
+        # We'd be the first holder, so only mark held if pmset actually flipped.
         if _pmset_disable; then
             touch "$lid_file"
             log "session=$SESSION_ID lid-close sleep DISABLED (first holder)"
