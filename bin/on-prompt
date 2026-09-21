@@ -10,6 +10,12 @@ CWD=$(hook_field cwd)
 PROJECT=$(basename "${CWD:-$PWD}")
 LABEL=$(hook_field prompt | one_line)
 
+# System-injected turns (task notifications, reminders) clean down to nothing
+# useful, so keep whatever this session was last actually asked to do.
+if [ "${#LABEL}" -lt 4 ] && [ -f "$NOSLEEP_DIR/$SESSION_ID.meta" ]; then
+    LABEL=$(cut -f2 "$NOSLEEP_DIR/$SESSION_ID.meta" 2>/dev/null)
+fi
+
 # Drop any orphan state before we evaluate refcounts.
 clean_stale_sessions
 

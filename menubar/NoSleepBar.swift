@@ -74,6 +74,18 @@ struct SessionInfo {
     var secondsLeft = 0
 
     var title: String { project.isEmpty ? "session \(id)" : project }
+
+    // Older hook versions stored the prompt verbatim, so strip the markup that
+    // rides along with pasted images and task notifications.
+    var readableLabel: String {
+        var text = label
+        for pattern in ["<[^>]*>", "\\[Image #[0-9]+\\]", "\\[Request interrupted[^\\]]*\\]",
+                        "toolu_[A-Za-z0-9]*", "[A-Za-z0-9_-]{16,}"] {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespaces)
+    }
 }
 
 struct Stats {
@@ -135,6 +147,72 @@ func run(_ launchPath: String, _ args: [String]) -> String? {
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     return String(data: data, encoding: .utf8)
+}
+
+
+// MARK: - menu styling
+//
+// A menu of disabled NSMenuItems renders as one flat grey column with no
+// hierarchy, so the readout is built from custom views instead: only the
+// things you can actually click stay ordinary menu items.
+
+enum Style {
+    static let width: CGFloat = 308
+    static let inset: CGFloat = 15
+}
+
+func label(_ text: String,
+           size: CGFloat,
+           weight: NSFont.Weight = .regular,
+           color: NSColor = .labelColor,
+           tracking: CGFloat = 0,
+           monoDigits: Bool = false) -> NSTextField {
+    let field = NSTextField(labelWithString: text)
+    field.font = monoDigits
+        ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+        : NSFont.systemFont(ofSize: size, weight: weight)
+    field.textColor = color
+    field.lineBreakMode = .byTruncatingTail
+    field.maximumNumberOfLines = 1
+    field.cell?.truncatesLastVisibleLine = true
+    if tracking != 0 {
+        field.attributedStringValue = NSAttributedString(
+            string: text,
+            attributes: [.font: field.font as Any,
+                         .foregroundColor: color,
+                         .kern: tracking])
+    }
+    return field
+}
+
+func stack(_ views: [NSView],
+           axis: NSUserInterfaceLayoutOrientation,
+           spacing: CGFloat,
+           alignment: NSLayoutConstraint.Attribute) -> NSStackView {
+    let view = NSStackView(views: views)
+    view.orientation = axis
+    view.spacing = spacing
+    view.alignment = alignment
+    return view
+}
+
+func menuRow(_ content: NSView, top: CGFloat = 5, bottom: CGFloat = 5) -> NSMenuItem {
+    let box = NSView()
+    content.translatesAutoresizingMaskIntoConstraints = false
+    box.addSubview(content)
+    NSLayoutConstraint.activate([
+        box.widthAnchor.constraint(equalToConstant: Style.width),
+        content.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: Style.inset),
+        content.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -Style.inset),
+        content.topAnchor.constraint(equalTo: box.topAnchor, constant: top),
+        content.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -bottom),
+    ])
+    box.layoutSubtreeIfNeeded()
+    box.frame = NSRect(x: 0, y: 0, width: Style.width,
+                       height: content.fittingSize.height + top + bottom)
+    let item = NSMenuItem()
+    item.view = box
+    return item
 }
 
 final class Controller: NSObject, NSMenuDelegate {
@@ -249,52 +327,122 @@ final class Controller: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         refresh()
         menu.removeAllItems()
+        menu.minimumWidth = Style.width
 
-        addHeader(snapshot.headline)
+        menu.addItem(headerRow())
 
         if snapshot.cliMissing {
-            addInfo("Looked for: \(cliPath)")
-            addSeparator()
+            menu.addItem(menuRow(label("Looked for \(cliPath)", size: 11, color: .secondaryLabelColor)))
+            menu.addItem(.separator())
             addAction("Quit", #selector(quit))
             return
         }
 
-        if !snapshot.healthy {
-            addInfo("Hooks have not fired. Run nosleep-claude status")
-        } else if snapshot.sleepBlocked {
-            addInfo("Held by: \(snapshot.blockedBy.joined(separator: ", "))")
-        } else {
-            addInfo("Nothing is holding sleep open")
-        }
-
-        addSeparator()
-        if snapshot.sessionList.isEmpty {
-            addInfo("No Claude session holding it")
-        } else {
-            for session in snapshot.sessionList.sorted(by: { $0.secondsLeft > $1.secondsLeft }) {
-                addSession(session)
+        if !snapshot.sessionList.isEmpty {
+            menu.addItem(.separator())
+            let sorted = snapshot.sessionList.sorted { $0.secondsLeft > $1.secondsLeft }
+            for session in sorted.prefix(4) {
+                menu.addItem(sessionRow(session))
+            }
+            if sorted.count > 4 {
+                menu.addItem(menuRow(label("+\(sorted.count - 4) more", size: 11,
+                                           color: .tertiaryLabelColor), top: 0, bottom: 4))
             }
         }
 
-        addSeparator()
-        let stats = snapshot.stats
-        addInfo("Today  \(humanShort(stats.todayHeld)) awake · \(humanShort(stats.todayWorked)) working · \(stats.todayPrompts) prompts")
-        addInfo("Week   \(humanShort(stats.weekHeld)) awake")
-        addInfo("Total  \(humanShort(stats.allHeld)) awake")
-        addInfo("Last Claude hook: \(humanAge(snapshot.lastHookAge))")
-        addInfo(snapshot.lidRuleInstalled
-            ? "Lid closed on battery: \(snapshot.lidClosedBlocked ? "stays awake" : "sleeps (no active prompt)")"
-            : "Lid closed on battery: sleeps (rule not installed)")
+        menu.addItem(.separator())
+        menu.addItem(menuRow(todayRow(), top: 4, bottom: 5))
 
-        addSeparator()
+        menu.addItem(.separator())
         let hold = addAction(manualHold == nil ? "Keep awake for 1 hour" : "Release manual hold",
                              #selector(toggleManualHold))
         hold.state = manualHold == nil ? .off : .on
-        addAction("Copy status", #selector(copyStatus))
-        addAction("Copy stats", #selector(copyStats))
-        addAction("Open log", #selector(openLog))
-        addSeparator()
+
+        // The rarely-wanted bits live one level down so the menu stays short.
+        let details = NSMenu()
+        for (title, selector) in [("Copy status", #selector(copyStatus)),
+                                  ("Copy stats", #selector(copyStats)),
+                                  ("Open log", #selector(openLog))] {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            item.target = self
+            details.addItem(item)
+        }
+        let detailsItem = NSMenuItem(title: "Details", action: nil, keyEquivalent: "")
+        detailsItem.submenu = details
+        menu.addItem(detailsItem)
+
         addAction("Quit", #selector(quit))
+    }
+
+    // MARK: - rows
+
+    func headerRow() -> NSMenuItem {
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4
+        dot.layer?.backgroundColor = statusColor.cgColor
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            dot.heightAnchor.constraint(equalToConstant: 8),
+        ])
+
+        let title = label(snapshot.headline, size: 14, weight: .semibold)
+
+        // The holder list is only worth the line when Claude is not the one
+        // holding it: the sessions below already account for that case.
+        var detail: String?
+        if snapshot.cliMissing {
+            detail = "nosleep-claude CLI not found"
+        } else if !snapshot.healthy {
+            detail = "run nosleep-claude status"
+        } else if snapshot.sleepBlocked && !snapshot.blockedByClaude {
+            let other = snapshot.blockedBy.filter { $0 != "nosleep-claude" }
+            detail = other.isEmpty ? nil : "held by \(other[0])"
+                + (other.count > 1 ? " +\(other.count - 1)" : "")
+        }
+
+        var column: [NSView] = [title]
+        if let detail {
+            column.append(label(detail, size: 11, color: .secondaryLabelColor))
+        }
+        let text = stack(column, axis: .vertical, spacing: 1, alignment: .leading)
+        let dotColumn = stack([dot, NSView()], axis: .vertical, spacing: 0, alignment: .centerX)
+        dotColumn.setHuggingPriority(.defaultHigh, for: .horizontal)
+
+        let row = stack([dot, text], axis: .horizontal, spacing: 9, alignment: .firstBaseline)
+        row.alignment = .top
+        return menuRow(row, top: 10, bottom: 4)
+    }
+
+    var statusColor: NSColor {
+        if snapshot.cliMissing || !snapshot.healthy { return .systemOrange }
+        if snapshot.blockedByClaude { return .systemGreen }
+        if snapshot.sleepBlocked { return .systemTeal }
+        return .tertiaryLabelColor
+    }
+
+    func sessionRow(_ session: SessionInfo) -> NSMenuItem {
+        let name = label(session.title, size: 12.5, weight: .medium)
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let remaining = label(humanShort(session.secondsLeft), size: 11,
+                              weight: .regular, color: .tertiaryLabelColor, monoDigits: true)
+        remaining.setContentHuggingPriority(.required, for: .horizontal)
+        remaining.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let top = stack([name, NSView(), remaining], axis: .horizontal, spacing: 8, alignment: .firstBaseline)
+        let readable = session.readableLabel
+        let prompt = label(readable.isEmpty ? "waiting for its next prompt" : readable,
+                           size: 11, color: .secondaryLabelColor)
+        let column = stack([top, prompt], axis: .vertical, spacing: 1, alignment: .leading)
+        column.setHuggingPriority(.defaultLow, for: .horizontal)
+        return menuRow(column, top: 4, bottom: 4)
+    }
+
+    func todayRow() -> NSView {
+        let stats = snapshot.stats
+        let line = "Today  \(humanShort(stats.todayHeld)) awake · \(humanShort(stats.todayWorked)) working"
+        return label(line, size: 11.5, color: .secondaryLabelColor, monoDigits: true)
     }
 
     @discardableResult
@@ -303,48 +451,6 @@ final class Controller: NSObject, NSMenuDelegate {
         item.target = self
         menu.addItem(item)
         return item
-    }
-
-    func addHeader(_ title: String) {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [.font: NSFont.menuBarFont(ofSize: 0)])
-        item.isEnabled = false
-        menu.addItem(item)
-    }
-
-    func addInfo(_ title: String) {
-        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-        item.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                         .foregroundColor: NSColor.secondaryLabelColor])
-        item.isEnabled = false
-        menu.addItem(item)
-    }
-
-    // Two lines: what the session is working in, and the last thing it was
-    // asked to do, which is the only handle that tells two of them apart.
-    func addSession(_ session: SessionInfo) {
-        let heading = "\(session.title)  ·  \(humanShort(session.secondsLeft)) left"
-        let text = NSMutableAttributedString(
-            string: heading,
-            attributes: [.font: NSFont.menuFont(ofSize: 0),
-                         .foregroundColor: NSColor.labelColor])
-        if !session.label.isEmpty {
-            let trimmed = session.label.count > 54
-                ? String(session.label.prefix(54)) + "…"
-                : session.label
-            text.append(NSAttributedString(
-                string: "\n" + trimmed,
-                attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                             .foregroundColor: NSColor.secondaryLabelColor]))
-        }
-        let item = NSMenuItem(title: heading, action: nil, keyEquivalent: "")
-        item.attributedTitle = text
-        item.isEnabled = false
-        menu.addItem(item)
     }
 
     func addSeparator() { menu.addItem(.separator()) }
@@ -396,6 +502,69 @@ final class Controller: NSObject, NSMenuDelegate {
     }
 }
 
+
+// Rendering the menu offscreen is the only way to check its layout without
+// opening it by hand, which a menu bar manager can make impossible.
+extension Controller {
+    func previewImage(dark: Bool) -> NSImage {
+        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        menuNeedsUpdate(menu)
+
+        var rows: [(NSImage?, NSMenuItem)] = []
+        var height: CGFloat = 12
+        for item in menu.items {
+            if let view = item.view {
+                view.appearance = appearance
+                view.layoutSubtreeIfNeeded()
+                let bounds = view.bounds
+                var image: NSImage?
+                if let rep = view.bitmapImageRepForCachingDisplay(in: bounds) {
+                    view.cacheDisplay(in: bounds, to: rep)
+                    let shot = NSImage(size: bounds.size)
+                    shot.addRepresentation(rep)
+                    image = shot
+                }
+                rows.append((image, item))
+                height += bounds.height
+            } else if item.isSeparatorItem {
+                rows.append((nil, item))
+                height += 11
+            } else {
+                rows.append((nil, item))
+                height += 22
+            }
+        }
+        height += 12
+
+        let canvas = NSImage(size: NSSize(width: Style.width, height: height))
+        canvas.lockFocus()
+        NSAppearance.current = appearance
+        (dark ? NSColor(calibratedWhite: 0.16, alpha: 1) : NSColor(calibratedWhite: 0.97, alpha: 1)).setFill()
+        NSRect(x: 0, y: 0, width: Style.width, height: height).fill()
+
+        var y = height - 12
+        for (image, item) in rows {
+            if let image {
+                y -= image.size.height
+                image.draw(at: NSPoint(x: 0, y: y), from: .zero, operation: .sourceOver, fraction: 1)
+            } else if item.isSeparatorItem {
+                y -= 11
+                (dark ? NSColor(calibratedWhite: 1, alpha: 0.14) : NSColor(calibratedWhite: 0, alpha: 0.12)).setFill()
+                NSRect(x: Style.inset, y: y + 5, width: Style.width - Style.inset * 2, height: 1).fill()
+            } else {
+                y -= 22
+                let text = NSAttributedString(string: item.title, attributes: [
+                    .font: NSFont.systemFont(ofSize: 13),
+                    .foregroundColor: dark ? NSColor.white : NSColor.black,
+                ])
+                text.draw(at: NSPoint(x: Style.inset, y: y + 4))
+            }
+        }
+        canvas.unlockFocus()
+        return canvas
+    }
+}
+
 // `nosleepbar --export-icon <path>` writes the awake glyph to a PNG, which is
 // the only way to look at a hand-drawn template image without the bar.
 let args = CommandLine.arguments
@@ -413,4 +582,20 @@ if let flag = args.firstIndex(of: "--export-icon"), args.count > flag + 1 {
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let controller = Controller()
+
+// `nosleepbar --preview-menu <path>` draws the menu to a PNG and exits.
+if let flag = args.firstIndex(of: "--preview-menu"), args.count > flag + 1 {
+    let base = args[flag + 1]
+    for (suffix, dark) in [("-dark", true), ("-light", false)] {
+        let image = controller.previewImage(dark: dark)
+        if let tiff = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            let path = base.replacingOccurrences(of: ".png", with: "\(suffix).png")
+            try? png.write(to: URL(fileURLWithPath: path))
+        }
+    }
+    exit(0)
+}
+
 app.run()

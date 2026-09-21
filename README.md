@@ -59,7 +59,9 @@ nosleep-claude menubar restart    # rebuild after editing the Swift source
 nosleep-claude menubar uninstall
 ```
 
-A small `NSStatusItem` app (`menubar/NoSleepBar.swift`, ~100KB compiled, no Dock icon) that renders `status --json`: a filled disc with a pulse trace knocked out of it while something is holding this Mac awake, a hollow ring when it will sleep on idle, and a countdown while a Claude session holds the grace timer. The menu names the current holders, every Claude session holding it (its project and the last thing it was asked, since that's the only way to tell two of them apart), today's and this week's totals, when hooks last fired, the lid-closed state, and a manual one-hour hold.
+A small `NSStatusItem` app (`menubar/NoSleepBar.swift`, ~100KB compiled, no Dock icon) that renders `status --json`: a filled disc with a pulse trace knocked out of it while something is holding this Mac awake, a hollow ring when it will sleep on idle, and a countdown while a Claude session holds the grace timer. The menu is four things: the state, the Claude sessions holding it (project plus the last thing each was asked, since that's the only way to tell two of them apart), today's totals, and a manual one-hour hold. Everything else is behind Details or in the CLI.
+
+`nosleepbar --preview-menu out.png` renders the menu to light and dark PNGs without opening it, which is how to check its layout when a menu bar manager hides the item.
 
 It reads the same JSON anything else can:
 

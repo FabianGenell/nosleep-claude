@@ -4,7 +4,7 @@
 # rule that enables lid-closed sleep prevention on battery.
 set -u
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 PLUGIN_ID="nosleep-claude@nosleep-claude"
 MARKETPLACE="nosleep-claude"
 NOSLEEP_DIR="/tmp/nosleep-claude"

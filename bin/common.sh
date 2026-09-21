@@ -58,8 +58,12 @@ if isinstance(value, str):
 # than any readout needs.
 one_line() {
     tr '\t\n\r' '   ' \
-        | sed -e 's/<pasted_content[^>]*>//g' -e 's#</pasted_content[^>]*>##g' \
-              -e 's/  */ /g' -e 's/^ //' -e 's/ $//' \
+        | sed -e 's/<[^>]*>//g' \
+              -e 's/\[Image #[0-9]*\]//g' \
+              -e 's/\[Request interrupted[^]]*\]//g' \
+              -e 's/toolu_[A-Za-z0-9]*//g' \
+              -e 's/[A-Za-z0-9_-]\{16,\}//g' \
+              -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//' \
         | cut -c1-90
 }
 
