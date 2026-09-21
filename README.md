@@ -59,7 +59,7 @@ nosleep-claude menubar restart    # rebuild after editing the Swift source
 nosleep-claude menubar uninstall
 ```
 
-A small `NSStatusItem` app (`menubar/NoSleepBar.swift`, ~100KB compiled, no Dock icon) that renders `status --json`: a filled disc with a pulse trace knocked out of it while something is holding this Mac awake, a hollow ring when it will sleep on idle, and a countdown while a Claude session holds the grace timer. The menu names the current holders, the number of Claude sessions, when hooks last fired, the lid-closed state, and offers a manual one-hour hold.
+A small `NSStatusItem` app (`menubar/NoSleepBar.swift`, ~100KB compiled, no Dock icon) that renders `status --json`: a filled disc with a pulse trace knocked out of it while something is holding this Mac awake, a hollow ring when it will sleep on idle, and a countdown while a Claude session holds the grace timer. The menu names the current holders, every Claude session holding it (its project and the last thing it was asked, since that's the only way to tell two of them apart), today's and this week's totals, when hooks last fired, the lid-closed state, and a manual one-hour hold.
 
 It reads the same JSON anything else can:
 
@@ -78,6 +78,20 @@ nosleep-claude menubar restart
 ```
 
 `menubar install` builds with `swiftc` (Xcode command line tools) and installs a `net.genell.nosleepbar` LaunchAgent so it comes back at login. If a menu bar manager like Ice or Bartender is running, the icon may land in its hidden section.
+
+## Stats
+
+```sh
+nosleep-claude stats           # today / 7 days / 30 days / all time
+nosleep-claude stats --json
+```
+
+Every prompt, stop and session end appends a row to `~/.local/state/nosleep-claude/events.tsv` (project and the first 90 characters of the prompt, so live sessions can be told apart). Two numbers come out of it:
+
+- **awake**: wall clock the Mac stayed up because of this plugin, as the union of every session's hold window, so two sessions working at once are not counted twice
+- **working**: time Claude spent answering, summed per session, which does count both
+
+The runtime state in `/tmp` dies with the boot; this history does not.
 
 ## Troubleshooting
 

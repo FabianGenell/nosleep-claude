@@ -6,6 +6,11 @@ NOSLEEP_DIR="/tmp/nosleep-claude"
 SUDOERS_FILE="/etc/sudoers.d/nosleep-claude"
 LOG_FILE="$NOSLEEP_DIR/nosleep-claude.log"
 
+# Runtime state lives in /tmp and dies with the boot; the event history has to
+# outlive it, so it goes under the user's state dir.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nosleep-claude"
+EVENTS_FILE="$STATE_DIR/events.tsv"
+
 # How long the Mac stays awake after Claude's last activity. Every prompt,
 # tool call, and stop restarts a caffeinate with this timeout, so sleep
 # prevention always self-expires. A missed Stop hook can't pin the machine
@@ -17,23 +22,59 @@ GRACE_SECS="${NOSLEEP_GRACE_SECS:-900}"
 REFRESH_THROTTLE_SECS=60
 
 mkdir -p "$NOSLEEP_DIR" 2>/dev/null || true
+mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 log() {
     printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${HOOK:-?}" "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-# Read session_id from hook JSON on stdin. Falls back to grep if jq missing.
-read_session_id() {
-    local input
-    input=$(cat)
+# Hook JSON arrives once on stdin, so read it whole and pick fields out of it.
+read_hook_input() { HOOK_INPUT=$(cat); }
+
+hook_field() {
+    local field="$1"
+    [ -n "${HOOK_INPUT:-}" ] || return 0
     if command -v jq >/dev/null 2>&1; then
-        printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null
+        printf '%s' "$HOOK_INPUT" | jq -r --arg f "$field" '.[$f] // empty' 2>/dev/null
+    elif command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$HOOK_INPUT" | python3 -c '
+import json, sys
+try:
+    value = json.load(sys.stdin).get(sys.argv[1])
+except Exception:
+    value = None
+if isinstance(value, str):
+    print(value)
+' "$field" 2>/dev/null
     else
-        printf '%s' "$input" \
-            | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        printf '%s' "$HOOK_INPUT" \
+            | grep -o "\"$field\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
             | head -1 \
             | sed 's/.*"\([^"]*\)"$/\1/'
     fi
+}
+
+# Tabs and newlines would break the event file, and a whole prompt is more
+# than any readout needs.
+one_line() {
+    tr '\t\n\r' '   ' \
+        | sed -e 's/<pasted_content[^>]*>//g' -e 's#</pasted_content[^>]*>##g' \
+              -e 's/  */ /g' -e 's/^ //' -e 's/ $//' \
+        | cut -c1-90
+}
+
+# Append one row to the history the stats command reads back.
+record_event() {
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$(date +%s)" "$1" "$SESSION_ID" "${PROJECT:-}" "${LABEL:-}" \
+        >> "$EVENTS_FILE" 2>/dev/null || true
+}
+
+# What this session is: the directory it runs in, and the last thing it was
+# asked to do. Kept beside the timer so the menu bar can name live sessions.
+write_session_meta() {
+    printf '%s\t%s\t%s\n' "${PROJECT:-}" "${LABEL:-}" "$(date +%s)" \
+        > "$NOSLEEP_DIR/$SESSION_ID.meta" 2>/dev/null || true
 }
 
 kill_pid_silent() {
@@ -76,7 +117,7 @@ clean_stale_sessions() {
         pid=$(cat "$cf" 2>/dev/null)
         if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
             sid=$(basename "$cf" .cpid)
-            rm -f "$cf" "$NOSLEEP_DIR/$sid.lid"
+            rm -f "$cf" "$NOSLEEP_DIR/$sid.lid" "$NOSLEEP_DIR/$sid.meta"
         fi
     done
 }

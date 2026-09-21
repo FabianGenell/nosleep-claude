@@ -2,7 +2,8 @@
 HOOK=Stop
 . "$(dirname "$0")/common.sh"
 
-SESSION_ID=$(read_session_id)
+read_hook_input
+SESSION_ID=$(hook_field session_id)
 [ -z "$SESSION_ID" ] && exit 0
 
 # Claude just finished responding. Restart the timer so the grace window
@@ -10,5 +11,7 @@ SESSION_ID=$(read_session_id)
 refresh_caffeinate force
 
 lid_lock_release
+
+record_event stop
 
 exit 0

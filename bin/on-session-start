@@ -2,7 +2,8 @@
 HOOK=SessionStart
 . "$(dirname "$0")/common.sh"
 
-SESSION_ID=$(read_session_id)
+read_hook_input
+SESSION_ID=$(hook_field session_id)
 [ -z "$SESSION_ID" ] && exit 0
 
 # Wipe state for any session whose caffeinate is gone (handles prior crashes).
@@ -15,7 +16,7 @@ if [ "$(count_active_lids)" = "0" ]; then
 fi
 
 # Drop any leftover state for this specific session_id (unlikely collision).
-rm -f "$NOSLEEP_DIR/$SESSION_ID.cpid" "$NOSLEEP_DIR/$SESSION_ID.lid"
+rm -f "$NOSLEEP_DIR/$SESSION_ID.cpid" "$NOSLEEP_DIR/$SESSION_ID.lid" "$NOSLEEP_DIR/$SESSION_ID.meta"
 
 log "session=$SESSION_ID started (active lid holders: $(count_active_lids))"
 exit 0

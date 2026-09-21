@@ -2,7 +2,8 @@
 HOOK=SessionEnd
 . "$(dirname "$0")/common.sh"
 
-SESSION_ID=$(read_session_id)
+read_hook_input
+SESSION_ID=$(hook_field session_id)
 [ -z "$SESSION_ID" ] && exit 0
 
 CPID_FILE="$NOSLEEP_DIR/$SESSION_ID.cpid"
@@ -14,6 +15,9 @@ fi
 
 # Refcounted release in case the lid lock was held by this session.
 lid_lock_release
+
+record_event end
+rm -f "$NOSLEEP_DIR/$SESSION_ID.meta"
 
 log "session=$SESSION_ID ended"
 exit 0

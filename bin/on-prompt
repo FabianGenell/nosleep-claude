@@ -2,8 +2,13 @@
 HOOK=UserPromptSubmit
 . "$(dirname "$0")/common.sh"
 
-SESSION_ID=$(read_session_id)
+read_hook_input
+SESSION_ID=$(hook_field session_id)
 [ -z "$SESSION_ID" ] && exit 0
+
+CWD=$(hook_field cwd)
+PROJECT=$(basename "${CWD:-$PWD}")
+LABEL=$(hook_field prompt | one_line)
 
 # Drop any orphan state before we evaluate refcounts.
 clean_stale_sessions
@@ -14,5 +19,8 @@ refresh_caffeinate force
 
 # Acquire shared lid-lock (refcounted across all sessions).
 lid_lock_acquire
+
+write_session_meta
+record_event prompt
 
 exit 0

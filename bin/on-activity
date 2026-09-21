@@ -2,7 +2,8 @@
 HOOK=PostToolUse
 . "$(dirname "$0")/common.sh"
 
-SESSION_ID=$(read_session_id)
+read_hook_input
+SESSION_ID=$(hook_field session_id)
 [ -z "$SESSION_ID" ] && exit 0
 
 # Claude just used a tool, so extend the grace timer (throttled so

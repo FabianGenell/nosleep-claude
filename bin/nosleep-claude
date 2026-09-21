@@ -4,7 +4,7 @@
 # rule that enables lid-closed sleep prevention on battery.
 set -u
 
-VERSION="1.4.4"
+VERSION="1.5.0"
 PLUGIN_ID="nosleep-claude@nosleep-claude"
 MARKETPLACE="nosleep-claude"
 NOSLEEP_DIR="/tmp/nosleep-claude"
@@ -15,6 +15,8 @@ SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 KNOWN_MARKETPLACES="$CLAUDE_DIR/plugins/known_marketplaces.json"
 INSTALLED_PLUGINS="$CLAUDE_DIR/plugins/installed_plugins.json"
 GRACE_SECS="${NOSLEEP_GRACE_SECS:-900}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/nosleep-claude"
+EVENTS_FILE="$STATE_DIR/events.tsv"
 MENUBAR_LABEL="net.genell.nosleepbar"
 MENUBAR_PLIST="$HOME/Library/LaunchAgents/$MENUBAR_LABEL.plist"
 MENUBAR_BIN="$HOME/.local/bin/nosleepbar"
@@ -31,6 +33,7 @@ Usage:
   nosleep-claude status --short      One line: OK / IDLE / STALE / BROKEN
   nosleep-claude status --json       Machine-readable snapshot
   nosleep-claude logs                Show recent hook log entries
+  nosleep-claude stats [--json]      How long Claude has kept this Mac awake
   nosleep-claude menubar install     Build and start the menu bar indicator
   nosleep-claude menubar uninstall   Stop and remove it
   nosleep-claude menubar restart     Rebuild from source and reload
@@ -307,7 +310,7 @@ cmd_status() {
 # Machine-readable snapshot, used by the menu bar app and anything else that
 # wants to know whether this Mac is going to sleep.
 cmd_status_json() {
-    local live=0 left=0 elapsed pid f sid
+    local live=0 left=0 elapsed pid f sid detail=""
     local -a session_pids=()
     if [ -d "$NOSLEEP_DIR" ]; then
         for f in "$NOSLEEP_DIR"/*.cpid; do
@@ -316,10 +319,19 @@ cmd_status_json() {
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 live=$((live + 1))
                 session_pids+=("$pid")
+                sid=$(basename "$f" .cpid)
                 elapsed=$(pid_elapsed_secs "$pid" || echo 0)
                 local this_left=$((GRACE_SECS - elapsed))
                 [ "$this_left" -lt 0 ] && this_left=0
                 [ "$this_left" -gt "$left" ] && left=$this_left
+
+                # Who this session is: written by the prompt hook, so a session
+                # that has not been prompted yet simply has no name to show.
+                local meta_project="" meta_label="" meta_at=0
+                if [ -f "$NOSLEEP_DIR/$sid.meta" ]; then
+                    IFS=$'\t' read -r meta_project meta_label meta_at < "$NOSLEEP_DIR/$sid.meta"
+                fi
+                detail="${detail:+$detail,}{\"session\":\"$(json_escape "${sid:0:8}")\",\"project\":\"$(json_escape "$meta_project")\",\"label\":\"$(json_escape "$meta_label")\",\"seconds_left\":$this_left,\"last_prompt\":${meta_at:-0}}"
             fi
         done
     fi
@@ -383,13 +395,31 @@ cmd_status_json() {
     printf '"sleep_blocked":%s,' "$blocked"
     printf '"blocked_by":[%s],' "$arr"
     printf '"sessions":%s,' "$live"
+    printf '"sessions_detail":[%s],' "$detail"
     printf '"seconds_left":%s,' "$left"
     printf '"grace_secs":%s,' "$GRACE_SECS"
     printf '"lid_rule_installed":%s,' "$lid_rule"
     printf '"lid_closed_blocked":%s,' "$lid_blocked"
     printf '"last_hook_epoch":%s,' "$last_epoch"
     printf '"last_hook_age":%s,' "$last_age"
-    printf '"last_hook_line":"%s"' "$(json_escape "$last_line")"
+    printf '"last_hook_line":"%s",' "$(json_escape "$last_line")"
+
+    # Totals for the menu bar readout. Cheap enough to recompute each poll:
+    # the history is one line per prompt or stop.
+    local today_held=0 today_worked=0 today_prompts=0 week_held=0 all_held=0
+    if [ -f "$EVENTS_FILE" ]; then
+        local statline
+        while IFS= read -r statline; do
+            case "$statline" in STAT_*) eval "$statline" ;; esac
+        done < <(stats_compute env 2>/dev/null)
+        today_held=${STAT_TODAY_HELD:-0}
+        today_worked=${STAT_TODAY_WORKED:-0}
+        today_prompts=${STAT_TODAY_PROMPTS:-0}
+        week_held=${STAT_7D_HELD:-0}
+        all_held=${STAT_ALL_HELD:-0}
+    fi
+    printf '"stats":{"today_held":%s,"today_worked":%s,"today_prompts":%s,"week_held":%s,"all_held":%s}' \
+        "$today_held" "$today_worked" "$today_prompts" "$week_held" "$all_held"
     printf '}\n'
 }
 
@@ -502,6 +532,207 @@ cmd_menubar() {
     esac
 }
 
+# ----------------------------------------------------------------- stats
+
+# The event history is a flat TSV of prompt/stop/end rows. Turning that into
+# "how long was this Mac awake because of Claude" needs interval merging, so
+# the arithmetic lives in python rather than being faked in awk.
+#
+#   held   union of [prompt, last activity + grace] across every session,
+#          which is wall-clock time the Mac stayed up because of this plugin
+#   worked sum of prompt -> stop per session, so two sessions working at once
+#          count twice, because they did
+stats_compute() {
+    local mode="${1:-json}"
+    if ! command -v python3 >/dev/null 2>&1; then
+        [ "$mode" = "json" ] && echo '{"error":"python3 not available"}'
+        return 1
+    fi
+    python3 - "$EVENTS_FILE" "$GRACE_SECS" "$mode" <<'PY'
+import json, sys, time
+from datetime import datetime
+
+path, grace, mode = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+now = int(time.time())
+
+rows = []
+try:
+    with open(path) as handle:
+        for line in handle:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 3:
+                continue
+            try:
+                epoch = int(parts[0])
+            except ValueError:
+                continue
+            rows.append({
+                "epoch": epoch,
+                "event": parts[1],
+                "session": parts[2],
+                "project": parts[3] if len(parts) > 3 else "",
+                "label": parts[4] if len(parts) > 4 else "",
+            })
+except FileNotFoundError:
+    rows = []
+
+rows.sort(key=lambda r: r["epoch"])
+
+by_session = {}
+for row in rows:
+    by_session.setdefault(row["session"], []).append(row)
+
+work = []   # (start, end, project)
+hold = []   # (start, end)
+for session, events in by_session.items():
+    for i, row in enumerate(events):
+        if row["event"] != "prompt":
+            continue
+        end = None
+        for later in events[i + 1:]:
+            if later["event"] in ("stop", "end", "prompt"):
+                end = later["epoch"]
+                break
+        # No closing event means the turn is still open, or the session died
+        # mid-flight. Either way the timer could only have run a grace window.
+        capped = min(now, row["epoch"] + grace)
+        end = min(end, now) if end is not None else capped
+        if end < row["epoch"]:
+            end = row["epoch"]
+        work.append((row["epoch"], end, row["project"] or "unknown"))
+        hold.append((row["epoch"], min(now, end + grace)))
+
+def merge(intervals):
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+merged_hold = merge(hold)
+
+def clipped(intervals, since):
+    total = 0
+    for start, end in intervals:
+        lo, hi = max(start, since), min(end, now)
+        if hi > lo:
+            total += hi - lo
+    return total
+
+midnight = int(datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+first = rows[0]["epoch"] if rows else now
+windows = {
+    "today": midnight,
+    "7d": now - 7 * 86400,
+    "30d": now - 30 * 86400,
+    "all": first,
+}
+
+def window_stats(since):
+    prompts = [r for r in rows if r["event"] == "prompt" and r["epoch"] >= since]
+    return {
+        "held": clipped(merged_hold, since),
+        "worked": clipped([(a, b) for a, b, _ in work], since),
+        "prompts": len(prompts),
+        "sessions": len({r["session"] for r in prompts}),
+        "since": since,
+    }
+
+result = {name: window_stats(since) for name, since in windows.items()}
+
+projects = {}
+for start, end, project in work:
+    if end < windows["30d"]:
+        continue
+    bucket = projects.setdefault(project, {"project": project, "worked": 0, "prompts": 0})
+    bucket["worked"] += max(0, min(end, now) - max(start, windows["30d"]))
+for row in rows:
+    if row["event"] == "prompt" and row["epoch"] >= windows["30d"]:
+        bucket = projects.setdefault(row["project"] or "unknown", {"project": row["project"] or "unknown", "worked": 0, "prompts": 0})
+        bucket["prompts"] += 1
+
+longest = max(merged_hold, key=lambda pair: pair[1] - pair[0], default=None)
+
+payload = {
+    "windows": result,
+    "projects": sorted(projects.values(), key=lambda p: -p["worked"])[:8],
+    "longest": ({"secs": longest[1] - longest[0], "epoch": longest[0]} if longest else None),
+    "sessions_seen": len(by_session),
+    "first_event": first if rows else 0,
+    "events": len(rows),
+    "grace": grace,
+}
+
+if mode == "json":
+    print(json.dumps(payload))
+else:
+    for name in ("today", "7d", "30d", "all"):
+        key = name.upper().replace("D", "D")
+        stats = result[name]
+        print(f'STAT_{name.upper()}_HELD={stats["held"]}')
+        print(f'STAT_{name.upper()}_WORKED={stats["worked"]}')
+        print(f'STAT_{name.upper()}_PROMPTS={stats["prompts"]}')
+        print(f'STAT_{name.upper()}_SESSIONS={stats["sessions"]}')
+    print(f'STAT_EVENTS={payload["events"]}')
+PY
+}
+
+human_dur() {
+    local secs="${1:-0}"
+    if   [ "$secs" -lt 60 ]   ; then printf '%ss' "$secs"
+    elif [ "$secs" -lt 3600 ] ; then printf '%sm' "$((secs / 60))"
+    else printf '%sh %02dm' "$((secs / 3600))" "$(((secs % 3600) / 60))"
+    fi
+}
+
+cmd_stats() {
+    if [ "${1:-}" = "--json" ]; then
+        stats_compute json
+        return
+    fi
+    if [ ! -f "$EVENTS_FILE" ]; then
+        echo "No history yet at $EVENTS_FILE."
+        echo "It starts filling on the next prompt in a session that has the plugin loaded."
+        return 0
+    fi
+    local line
+    while IFS= read -r line; do
+        case "$line" in STAT_*) eval "$line" ;; esac
+    done < <(stats_compute env)
+
+    echo "nosleep-claude $VERSION"
+    echo
+    printf '%-10s %10s   %10s   %8s   %s\n' "" "AWAKE" "WORKING" "PROMPTS" "SESSIONS"
+    printf '%-10s %10s   %10s   %8s   %s\n' "today" "$(human_dur "${STAT_TODAY_HELD:-0}")" "$(human_dur "${STAT_TODAY_WORKED:-0}")" "${STAT_TODAY_PROMPTS:-0}" "${STAT_TODAY_SESSIONS:-0}"
+    printf '%-10s %10s   %10s   %8s   %s\n' "7 days" "$(human_dur "${STAT_7D_HELD:-0}")" "$(human_dur "${STAT_7D_WORKED:-0}")" "${STAT_7D_PROMPTS:-0}" "${STAT_7D_SESSIONS:-0}"
+    printf '%-10s %10s   %10s   %8s   %s\n' "30 days" "$(human_dur "${STAT_30D_HELD:-0}")" "$(human_dur "${STAT_30D_WORKED:-0}")" "${STAT_30D_PROMPTS:-0}" "${STAT_30D_SESSIONS:-0}"
+    printf '%-10s %10s   %10s   %8s   %s\n' "all time" "$(human_dur "${STAT_ALL_HELD:-0}")" "$(human_dur "${STAT_ALL_WORKED:-0}")" "${STAT_ALL_PROMPTS:-0}" "${STAT_ALL_SESSIONS:-0}"
+    echo
+    echo "awake   = wall clock the Mac stayed up because of this plugin (work plus grace)"
+    echo "working = time Claude spent answering, summed per session"
+    echo
+
+    if command -v jq >/dev/null 2>&1; then
+        local payload; payload=$(stats_compute json)
+        echo "Projects, last 30 days"
+        printf '%s' "$payload" | jq -r '.projects[] | "  \(.project)\t\(.worked)\t\(.prompts)"' \
+            | while IFS=$'\t' read -r project worked prompts; do
+                printf '  %-24s %8s   %s prompts\n' "$project" "$(human_dur "$worked")" "$prompts"
+            done
+        local longest; longest=$(printf '%s' "$payload" | jq -r '.longest.secs // empty')
+        local longest_at; longest_at=$(printf '%s' "$payload" | jq -r '.longest.epoch // empty')
+        if [ -n "$longest" ]; then
+            echo
+            printf '  longest single stretch   %s  (%s)\n' "$(human_dur "$longest")" "$(date -r "$longest_at" '+%Y-%m-%d %H:%M')"
+        fi
+    fi
+    echo
+    printf '  %s events since %s\n' "${STAT_EVENTS:-0}" "$(date -r "$(head -1 "$EVENTS_FILE" | cut -f1)" '+%Y-%m-%d' 2>/dev/null || echo '?')"
+    printf '  history  %s\n' "$EVENTS_FILE"
+}
+
 cmd_logs() {
     if [ -f "$LOG_FILE" ]; then
         tail -30 "$LOG_FILE"
@@ -555,6 +786,7 @@ case "${1:-help}" in
         esac
         ;;
     logs)                cmd_logs ;;
+    stats)               shift; cmd_stats "${1:-}" ;;
     menubar)             shift; cmd_menubar "${1:-status}" ;;
     enable-lid-closed)   cmd_enable_lid_closed ;;
     disable-lid-closed)  cmd_disable_lid_closed ;;

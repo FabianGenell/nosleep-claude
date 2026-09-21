@@ -67,6 +67,23 @@ func symbolImage(_ name: String, _ description: String) -> NSImage? {
     return image
 }
 
+struct SessionInfo {
+    var id = ""
+    var project = ""
+    var label = ""
+    var secondsLeft = 0
+
+    var title: String { project.isEmpty ? "session \(id)" : project }
+}
+
+struct Stats {
+    var todayHeld = 0
+    var todayWorked = 0
+    var todayPrompts = 0
+    var weekHeld = 0
+    var allHeld = 0
+}
+
 struct Snapshot {
     var verdict = "UNKNOWN"
     var healthy = false
@@ -78,6 +95,8 @@ struct Snapshot {
     var lidClosedBlocked = false
     var lastHookAge = -1
     var cliMissing = false
+    var sessionList: [SessionInfo] = []
+    var stats = Stats()
 
     var blockedByClaude: Bool { blockedBy.contains("nosleep-claude") }
 
@@ -169,6 +188,21 @@ final class Controller: NSObject, NSMenuDelegate {
         next.lidRuleInstalled = json["lid_rule_installed"] as? Bool ?? false
         next.lidClosedBlocked = json["lid_closed_blocked"] as? Bool ?? false
         next.lastHookAge = json["last_hook_age"] as? Int ?? -1
+        next.sessionList = (json["sessions_detail"] as? [[String: Any]] ?? []).map { row in
+            SessionInfo(
+                id: row["session"] as? String ?? "",
+                project: row["project"] as? String ?? "",
+                label: row["label"] as? String ?? "",
+                secondsLeft: row["seconds_left"] as? Int ?? 0)
+        }
+        if let raw = json["stats"] as? [String: Any] {
+            next.stats = Stats(
+                todayHeld: raw["today_held"] as? Int ?? 0,
+                todayWorked: raw["today_worked"] as? Int ?? 0,
+                todayPrompts: raw["today_prompts"] as? Int ?? 0,
+                weekHeld: raw["week_held"] as? Int ?? 0,
+                allHeld: raw["all_held"] as? Int ?? 0)
+        }
         snapshot = next
         render()
     }
@@ -234,9 +268,19 @@ final class Controller: NSObject, NSMenuDelegate {
         }
 
         addSeparator()
-        addInfo(snapshot.sessions > 0
-            ? "Claude sessions holding it: \(snapshot.sessions)"
-            : "No Claude session holding it")
+        if snapshot.sessionList.isEmpty {
+            addInfo("No Claude session holding it")
+        } else {
+            for session in snapshot.sessionList.sorted(by: { $0.secondsLeft > $1.secondsLeft }) {
+                addSession(session)
+            }
+        }
+
+        addSeparator()
+        let stats = snapshot.stats
+        addInfo("Today  \(humanShort(stats.todayHeld)) awake · \(humanShort(stats.todayWorked)) working · \(stats.todayPrompts) prompts")
+        addInfo("Week   \(humanShort(stats.weekHeld)) awake")
+        addInfo("Total  \(humanShort(stats.allHeld)) awake")
         addInfo("Last Claude hook: \(humanAge(snapshot.lastHookAge))")
         addInfo(snapshot.lidRuleInstalled
             ? "Lid closed on battery: \(snapshot.lidClosedBlocked ? "stays awake" : "sleeps (no active prompt)")"
@@ -247,6 +291,7 @@ final class Controller: NSObject, NSMenuDelegate {
                              #selector(toggleManualHold))
         hold.state = manualHold == nil ? .off : .on
         addAction("Copy status", #selector(copyStatus))
+        addAction("Copy stats", #selector(copyStats))
         addAction("Open log", #selector(openLog))
         addSeparator()
         addAction("Quit", #selector(quit))
@@ -279,6 +324,29 @@ final class Controller: NSObject, NSMenuDelegate {
         menu.addItem(item)
     }
 
+    // Two lines: what the session is working in, and the last thing it was
+    // asked to do, which is the only handle that tells two of them apart.
+    func addSession(_ session: SessionInfo) {
+        let heading = "\(session.title)  ·  \(humanShort(session.secondsLeft)) left"
+        let text = NSMutableAttributedString(
+            string: heading,
+            attributes: [.font: NSFont.menuFont(ofSize: 0),
+                         .foregroundColor: NSColor.labelColor])
+        if !session.label.isEmpty {
+            let trimmed = session.label.count > 54
+                ? String(session.label.prefix(54)) + "…"
+                : session.label
+            text.append(NSAttributedString(
+                string: "\n" + trimmed,
+                attributes: [.font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                             .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        let item = NSMenuItem(title: heading, action: nil, keyEquivalent: "")
+        item.attributedTitle = text
+        item.isEnabled = false
+        menu.addItem(item)
+    }
+
     func addSeparator() { menu.addItem(.separator()) }
 
     // MARK: - actions
@@ -305,6 +373,12 @@ final class Controller: NSObject, NSMenuDelegate {
 
     @objc func copyStatus() {
         guard let out = run(cliPath, ["status"]) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(out, forType: .string)
+    }
+
+    @objc func copyStats() {
+        guard let out = run(cliPath, ["stats"]) else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(out, forType: .string)
     }
