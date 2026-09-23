@@ -300,6 +300,8 @@ final class Controller: NSObject, NSMenuDelegate {
             image = symbolImage(sleepSymbol, description)
         }
 
+        // Glyph only. A countdown in the bar costs width every minute of the
+        // day to answer a question that is one click away.
         if let image {
             button.image = image
             button.title = ""
@@ -308,17 +310,10 @@ final class Controller: NSObject, NSMenuDelegate {
             button.title = snapshot.sleepBlocked ? "awake" : "zzz"
         }
 
-        // Only Claude's own hold gets a countdown; other holders come and go
-        // on their own schedule and a number there would be made up.
-        if snapshot.blockedByClaude && snapshot.secondsLeft > 0 {
-            button.title = " \(humanShort(snapshot.secondsLeft))"
-        } else if manualHold != nil {
-            button.title = " hold"
-        } else if !snapshot.cliMissing && snapshot.healthy {
-            button.title = ""
-        }
-
         if manualHold != nil { description += " (manual hold)" }
+        if snapshot.blockedByClaude && snapshot.secondsLeft > 0 {
+            description += ", \(humanShort(snapshot.secondsLeft)) left"
+        }
         button.toolTip = description
     }
 
